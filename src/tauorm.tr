@@ -1,0 +1,24 @@
+# tauorm — a SQLAlchemy-style SQL toolkit + ORM for Tauraro. See
+# ../PROPOSAL.md for the full architecture and phased build plan.
+#
+# This hub re-exports ONLY backend-agnostic Core: the DbConnection
+# interface and the shared error type (DbError). It deliberately does NOT
+# import either dialect adapter (postgres_dialect.tr, sqlite_dialect.tr) --
+# each of those imports a real driver package (postgres/sqlite3), and both
+# are OPTIONAL taupkg dependencies (see taupkg.toml). Importing them
+# unconditionally from here would force every consumer to have BOTH
+# backends installed regardless of which taupkg feature they actually
+# enabled, defeating the point of making them optional.
+#
+# A consumer imports the backend(s) they built with directly:
+#
+#   from tauorm import DbError
+#   from postgres_dialect import PostgresConnection   # --features postgres
+#   from sqlite_dialect import SqliteConnection       # --features sqlite
+#
+# STATUS: Phase 1 (Core dialect boundary) only -- the SQL expression
+# language, schema layer, and ORM (sessions, mapping, relationships) from
+# PROPOSAL.md's later phases are not built yet.
+
+from db_error import DbError
+from dbapi import DbConnection

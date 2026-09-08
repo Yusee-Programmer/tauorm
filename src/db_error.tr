@@ -1,0 +1,28 @@
+# tauorm.core.db_error — the single error type every dialect adapter raises.
+#
+# Interface methods need one fixed `throws` type, but each real driver has
+# its own: taupostgres raises PgError { sqlstate, message }, tausqlite3
+# raises SqliteError { code, message } -- different shapes, different field
+# names. A dialect adapter catches its driver's own exception at the
+# boundary and re-raises DbError, so Core and everything above it (the
+# expression language, schema layer, ORM) only ever handles one error type,
+# never a driver-specific one.
+
+pub class DbError:
+    # Driver-specific error code as text (a Postgres SQLSTATE like "42P01",
+    # a SQLite result code, ...) -- "" when there's nothing comparable (a
+    # translation/programming error raised by tauorm itself, not the driver).
+    pub code:    str
+    pub message: str
+
+extend DbError:
+    pub def init(code: str, message: str) -> DbError:
+        mut e = DbError()
+        e.code = code
+        e.message = message
+        return e
+
+    pub def __str__(self) -> str:
+        if self.code == "":
+            return "DbError: " + self.message
+        return "DbError[" + self.code + "]: " + self.message

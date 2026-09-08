@@ -1,0 +1,75 @@
+# tests.test_dbapi_sqlite — exercises the SQLite dialect adapter directly
+# (in-memory, no server needed).
+#
+# Every throws-call here is bound to an explicit `Result[T, DbError]` and
+# checked via `.is_err`/`.ok`/`.err` rather than `?` or a bare call assigned
+# straight to a typed variable -- confirmed the hard way: a bare call
+# (`mut conn = SqliteConnection.open(...)` with no annotation) type-checks
+# under `--check` but fails real codegen with "incompatible types when
+# initializing type 'X *' using type 'Result'" wherever it appears,
+# `main()` included -- taupostgres's own README shows that exact bare-call
+# style and it does NOT actually compile as literally written. See
+# postgres_dialect.tr's header comment for the same finding at the dialect
+# adapter level.
+#
+# Test logic is duplicated from test_dbapi_postgres.tr rather than shared
+# through a generic function over the DbConnection interface: a generic
+# function's monomorphized body calling methods on a concrete return type
+# (QueryResultSet, returned from the DbConnection-interface-bound
+# execute()) currently mis-codegens those as bare unqualified C calls (e.g.
+# `next(sel_rs)` instead of `QueryResultSet_next(sel_rs)`) -- a real
+# tauraroc bug, reproduced with a minimal repro unrelated to any DB code.
+# Tracked for a later fix; not blocking Phase 1 on today's compiler. Both
+# dialect adapters are still checked against the SAME DbConnection
+# interface (dbapi.tr) at the concrete level -- see their own `--check`
+# passes -- this only affects generic dispatch THROUGH that interface.
+
+from sqlite_dialect import SqliteConnection
+from db_error import DbError
+from query_result import QueryResultSet
+from std.core.vec import Vec
+from std.test import TestRunner
+
+def main():
+    mut t = TestRunner.init("dbapi (sqlite dialect)")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        t.fail("could not open SQLite connection: " + open_r.err.message)
+        t.summary()
+        return
+    mut conn = open_r.ok
+    mut no_params: Vec[str] = Vec[str].init(0)
+
+    mut create_r: Result[QueryResultSet, DbError] = conn.execute("CREATE TABLE t_users(id INTEGER PRIMARY KEY, name TEXT)", no_params)
+    if create_r.is_err:
+        t.fail("CREATE TABLE failed: " + create_r.err.message)
+        t.summary()
+        return
+    create_r.ok.close()
+
+    mut ins_r: Result[QueryResultSet, DbError] = conn.execute("INSERT INTO t_users(name) VALUES ('Ada')", no_params)
+    if ins_r.is_err:
+        t.fail("INSERT failed: " + ins_r.err.message)
+        t.summary()
+        return
+    mut ins_rs = ins_r.ok
+    t.assert_eq_int(ins_rs.rows_affected(), 1, "insert affects 1 row")
+    ins_rs.close()
+
+    mut sel_r: Result[QueryResultSet, DbError] = conn.execute("SELECT id, name FROM t_users", no_params)
+    if sel_r.is_err:
+        t.fail("SELECT failed: " + sel_r.err.message)
+        t.summary()
+        return
+    mut sel_rs = sel_r.ok
+    mut got_row = false
+    while sel_rs.next():
+        got_row = true
+        t.assert_eq_str(sel_rs.get_str(1), "Ada", "selected row has the inserted name")
+        t.assert_true(not sel_rs.is_null(0), "id column is not null")
+    t.assert_true(got_row, "SELECT returned at least one row")
+    sel_rs.close()
+
+    conn.close()
+    t.summary()

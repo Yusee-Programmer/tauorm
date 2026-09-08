@@ -1,0 +1,9 @@
+build/
+*.exe
+*.o
+*.o.src
+.taupkg/
+taupkg.lock
+
+**/tauraro_rt.h
+**/tauraro_types.h

@@ -1,0 +1,87 @@
+# tauorm.core.query_result — QueryResultSet: ONE concrete, dialect-agnostic
+# result-set representation, fully materialized at execute() time.
+#
+# Earlier design had each dialect adapter implement its OWN result-set class
+# satisfying a generic `DbResultSet` interface (mirroring taupostgres's
+# already-materialized PgResult vs. tausqlite3's step-cursor Statement
+# directly). Dropped after hitting two real tauraroc limitations back to
+# back while building it: (1) a generic function with mutually-referential
+# bounds like `[C: DbConnection[RS], RS: DbResultSet]` segfaults the
+# compiler outright (reproduced with a minimal, DB-unrelated repro); (2)
+# returning a concrete type where a bare (non-generic) interface return
+# type is expected type-checks under `--check` but fails real codegen
+# ("incompatible types when returning type 'X *' but 'Y_obj' was
+# expected") -- no dynamic-dispatch boxing is actually wired up for that
+# path yet. Both are compiler-level gaps, not application bugs; flagged to
+# fix later, but not blocking Phase 1 on today's compiler.
+#
+# The trade-off this design accepts: tausqlite3's Statement is naturally a
+# step-cursor, so using it here means stepping through EVERY row inside
+# execute() up front rather than truly streaming -- the same one-call,
+# whole-result-set model taupostgres's own PgResult already uses natively.
+# Fine for Phase 1; worth reconsidering (a real per-dialect streaming
+# cursor, once the compiler issues above are fixed) if a consumer's result
+# sets are large enough for eager materialization to matter.
+
+from std.core.vec import Vec
+from std.string.str import Str
+
+pub class QueryResultSet:
+    pub column_names: Vec[str]
+    pub rows:         Vec[Vec[str]]
+    pub null_flags:   Vec[Vec[bool]]   # parallel to rows -- true = that cell is SQL NULL
+    pub affected:     int
+    pub index:        int              # cursor position; -1 = before the first row
+
+extend QueryResultSet:
+    pub def init(column_names: Vec[str], rows: Vec[Vec[str]], null_flags: Vec[Vec[bool]], affected: int) -> QueryResultSet:
+        mut r = QueryResultSet()
+        r.column_names = column_names
+        r.rows = rows
+        r.null_flags = null_flags
+        r.affected = affected
+        r.index = -1
+        return r
+
+    pub def column_count(self) -> int:
+        return self.column_names.len
+
+    pub def column_name(self, idx: int) -> str:
+        return self.column_names.get(idx)
+
+    # Advances to the next row. True if a row is now available (read it via
+    # get_*()/is_null() before calling next() again); false once exhausted.
+    pub def next(self) -> bool:
+        self.index = self.index + 1
+        return self.index < self.rows.len
+
+    pub def get_str(self, idx: int) -> str:
+        return self.rows.get(self.index).get(idx)
+
+    pub def get_int(self, idx: int) -> int:
+        return Str.parse_int(self.get_str(idx))
+
+    pub def get_float(self, idx: int) -> float:
+        return Str.parse_float(self.get_str(idx))
+
+    # Both dialects render text-format booleans differently at the driver
+    # level (Postgres: "t"/"f"; SQLite has no real boolean type and stores
+    # 0/1) -- the dialect adapter normalizes to "true"/"false" text before
+    # this ever runs (see dialects/*.tr), so this only needs one check.
+    pub def get_bool(self, idx: int) -> bool:
+        return self.get_str(idx) == "true"
+
+    pub def is_null(self, idx: int) -> bool:
+        return self.null_flags.get(self.index).get(idx)
+
+    # Rows affected by an INSERT/UPDATE/DELETE (0 for a SELECT).
+    pub def rows_affected(self) -> int:
+        return self.affected
+
+    # No-op: fully materialized at execute() time, so there is no live
+    # driver handle left to release by the time a caller holds this. Kept
+    # as a method (not just dropped) so calling code doesn't need to know
+    # that -- matches dbapi.tr's DbConnection.close() being a real,
+    # necessary call while this one happens to be free.
+    pub def close(self):
+        pass

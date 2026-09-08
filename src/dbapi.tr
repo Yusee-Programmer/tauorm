@@ -1,0 +1,22 @@
+# tauorm.core.dbapi — the narrow interface boundary every dialect adapter
+# must satisfy. Modeled on Python's DB-API 2.0 / SQLAlchemy's own DBAPI
+# layer: a handful of primitive operations (execute, transaction control)
+# that Core's SQL expression language, schema layer, and ORM are all built
+# on top of -- none of them ever touch a concrete driver directly.
+#
+# A single, non-generic interface returning the one shared QueryResultSet
+# class (see query_result.tr's header comment for why: an earlier
+# generic-per-dialect-result-type design hit two real tauraroc compiler
+# limitations -- a segfault on mutually-referential generic bounds, and
+# missing dynamic-dispatch boxing for bare interface return types).
+
+from db_error import DbError
+from query_result import QueryResultSet
+from std.core.vec import Vec
+
+pub interface DbConnection:
+    def execute(self, sql: str, params: Vec[str]) throws DbError -> QueryResultSet
+    def begin(self) throws DbError
+    def commit(self) throws DbError
+    def rollback(self) throws DbError
+    def close(self)

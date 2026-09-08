@@ -1,0 +1,116 @@
+# tauorm.postgres_dialect — the Postgres DbConnection implementation,
+# wrapping taupostgres's Connection/PgResult/Row.
+#
+# execute() materializes taupostgres's PgResult into a QueryResultSet
+# immediately (column names, every row's text values + null flags,
+# affected-row count), then clears the PgResult -- see query_result.tr's
+# header comment for why materialization happens here instead of a
+# per-dialect streaming cursor.
+#
+# NOT re-exported by tauorm.tr's hub: importing this module requires the
+# `postgres` package (taupkg's `postgres` feature) to be installed. A
+# consumer who built without that feature must never have this module's
+# `from postgres import ...` resolved at all -- see taupkg.toml's header
+# comment on why the hub only re-exports backend-agnostic Core.
+#
+# Error translation: a bare call to a `throws E` function (no `?`) yields
+# the raw `Result[T, E]` rather than auto-raising or auto-unwrapping (see
+# tests/lang/05_error_handling.tr's "mixed models" section upstream) --
+# `?` itself does an early RETURN of the Err Result directly to the
+# caller, bypassing any try/except in the SAME function, so it can't be
+# used here either. Every call is therefore checked via
+# `.is_err`/`.ok`/`.err` and re-raised as DbError. An earlier version of
+# this file used `try:/except e:` instead; that compiled and even
+# `--check`ed clean, but failed real codegen with "incompatible types when
+# initializing type 'Connection *' using type 'Result'" -- a bare call
+# inside try: does NOT auto-unwrap the Result the way it looks like it
+# should. PgError's structured `sqlstate` survives into DbError.code with
+# this approach (try/except would have lost it -- `except e:` binds only
+# the exception's stringified form, confirmed empirically).
+
+from postgres import Connection, PgResult, PgError, BOOLOID
+from db_error import DbError
+from query_result import QueryResultSet
+from std.core.vec import Vec
+
+# Postgres's text-format boolean is exactly "t"/"f" -- normalize to the
+# "true"/"false" QueryResultSet.get_bool() expects across both dialects.
+def _norm_bool_text(s: str) -> str:
+    if s == "t": return "true"
+    if s == "f": return "false"
+    return s
+
+def _materialize(pg_result: PgResult) -> QueryResultSet:
+    mut ncols = pg_result.column_count()
+    mut nrows = pg_result.row_count()
+
+    mut names: Vec[str] = Vec[str].init(ncols)
+    mut ci = 0
+    while ci < ncols:
+        names.push(pg_result.column_name(ci) + "")
+        ci = ci + 1
+
+    mut rows: Vec[Vec[str]] = Vec[Vec[str]].init(nrows)
+    mut nulls: Vec[Vec[bool]] = Vec[Vec[bool]].init(nrows)
+    mut ri = 0
+    while ri < nrows:
+        mut row = pg_result.row(ri)
+        mut vals: Vec[str] = Vec[str].init(ncols)
+        mut is_null_row: Vec[bool] = Vec[bool].init(ncols)
+        mut cj = 0
+        while cj < ncols:
+            if row.is_null(cj):
+                vals.push("")
+                is_null_row.push(true)
+            else:
+                mut raw = row.get_str(cj) + ""
+                if row.column_type(cj) == BOOLOID():
+                    raw = _norm_bool_text(raw)
+                vals.push(raw)
+                is_null_row.push(false)
+            cj = cj + 1
+        rows.push(vals)
+        nulls.push(is_null_row)
+        ri = ri + 1
+
+    mut affected = pg_result.affected_rows()
+    mut out = QueryResultSet.init(names, rows, nulls, affected)
+    pg_result.clear()
+    return out
+
+
+pub class PostgresConnection:
+    pub conn: Connection
+
+extend PostgresConnection:
+    pub def open(conninfo: str) throws DbError -> PostgresConnection:
+        mut r: Result[Connection, PgError] = Connection.connect(conninfo)
+        if r.is_err:
+            raise(DbError.init(r.err.sqlstate, r.err.message))
+        mut pc = PostgresConnection()
+        pc.conn = r.ok
+        return pc
+
+    pub def execute(self, sql: str, params: Vec[str]) throws DbError -> QueryResultSet:
+        mut r: Result[PgResult, PgError] = self.conn.exec_params(sql, params)
+        if r.is_err:
+            raise(DbError.init(r.err.sqlstate, r.err.message))
+        return _materialize(r.ok)
+
+    pub def begin(self) throws DbError:
+        mut r: Result[void, PgError] = self.conn.begin()
+        if r.is_err:
+            raise(DbError.init(r.err.sqlstate, r.err.message))
+
+    pub def commit(self) throws DbError:
+        mut r: Result[void, PgError] = self.conn.commit()
+        if r.is_err:
+            raise(DbError.init(r.err.sqlstate, r.err.message))
+
+    pub def rollback(self) throws DbError:
+        mut r: Result[void, PgError] = self.conn.rollback()
+        if r.is_err:
+            raise(DbError.init(r.err.sqlstate, r.err.message))
+
+    pub def close(self):
+        self.conn.close()

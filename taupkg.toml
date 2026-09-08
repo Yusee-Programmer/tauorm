@@ -1,0 +1,37 @@
+[package]
+name    = "tauorm"
+version = "0.1.0"
+desc    = "A SQLAlchemy-style SQL toolkit + ORM for Tauraro -- dialect-agnostic Core (engine, expression language, schema) plus a declarative ORM (sessions, unit of work, relationships) over pluggable database backends."
+license = "MIT"
+# A pure library's entry point IS its library module (tauorm.tr), not a
+# main.tr -- consumers do `from tauorm import DbError, Table, Column, ...`,
+# and `taupkg build` compile-checks the module (tauraroc synthesizes the
+# entry). The hub deliberately does NOT re-export the dialect adapter
+# modules (src/core/dialects/*) -- see their header comments: each imports
+# a real driver package, so importing both unconditionally from the hub
+# would force every consumer to have BOTH optional backends installed
+# regardless of which taupkg feature they actually enabled.
+bin     = "src/tauorm.tr"
+
+[deps]
+# Both backends are OPTIONAL: tauorm's Core/ORM layers only depend on the
+# dialect *interface* (src/core/dbapi.tr, dialect.tr), never on a concrete
+# driver directly. A consumer pulls in exactly the backend(s) their project
+# targets via `taupkg build --features postgres` / `--features sqlite`
+# (or both: `--features postgres,sqlite`) -- see README.md's "Choosing a
+# backend" section. Building with no features at all still compiles Core +
+# ORM (schema definition, the expression language, session/mapper logic)
+# standalone; only the two dialect adapter modules need a real driver.
+postgres = { path = "../taupostgres", optional = true }
+sqlite3  = { path = "../tausqlite3",  optional = true }
+
+[features]
+# No default backend -- a consumer must opt in to at least one dialect to
+# actually connect to a database (matches "tell the user which backend(s)
+# their project needs" rather than silently vendoring both).
+default  = ""
+postgres = "postgres"
+sqlite   = "sqlite3"
+# Convenience bundle for consumers who genuinely want both wired up (e.g.
+# a library that supports either backend at its own consumers' choice).
+all      = "postgres, sqlite"
