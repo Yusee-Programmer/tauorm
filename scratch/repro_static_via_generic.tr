@@ -1,0 +1,31 @@
+# Repro: can a bare generic type parameter T call a STATIC (no-self) method
+# declared on the concrete class, e.g. T.make(n) where T is inferred/explicit
+# at the call site? This is the crux of whether Session[T] can generically
+# call T.from_row(rs) / T.__table() without an interface bound.
+
+class Foo:
+    pub n: int
+
+extend Foo:
+    pub def make(n: int) -> Foo:
+        mut f = Foo()
+        f.n = n
+        return f
+
+class Bar:
+    pub s: str
+
+extend Bar:
+    pub def make(n: int) -> Bar:
+        mut b = Bar()
+        b.s = "bar:" + n.to_str()
+        return b
+
+def build[T](n: int) -> T:
+    return T.make(n)
+
+def main():
+    mut f: Foo = build[Foo](7)
+    print(f.n)
+    mut b: Bar = build[Bar](9)
+    print(b.s)

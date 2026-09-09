@@ -1,0 +1,15 @@
+# Repro: does a macro that emits a plain TOP-LEVEL `pub def` (not inside an
+# extend block) actually get its function BODY linked, or just a
+# prototype/reference with no definition (undefined reference at link time)?
+
+macro def make_greeter(c) -> code:
+    return f"""pub def greet_{c.name}() -> str:
+    return "hello from {c.name}"
+"""
+
+@make_greeter
+class Foo:
+    pub n: int
+
+def main():
+    print(greet_Foo())

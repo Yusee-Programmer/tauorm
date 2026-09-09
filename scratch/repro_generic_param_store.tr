@@ -1,0 +1,31 @@
+# Repro: does a generic method taking a parameter of type T (matching the
+# class's own generic parameter) and just storing it (no field access
+# inside the method) compile cleanly? Needed for Session[T,...].add(obj: T).
+
+from std.core.vec import Vec
+
+class Foo:
+    pub n: int
+
+class Bag[T]:
+    pub items: Vec[T]
+
+extend Bag[T]:
+    pub def init[T]() -> Bag[T]:
+        mut b = Bag[T]()
+        b.items = Vec[T].init(4)
+        return b
+
+    pub def add[T](self, obj: T):
+        self.items.push(obj)
+
+    pub def count[T](self) -> int:
+        return self.items.len
+
+def main():
+    mut b: Bag[Foo] = Bag[Foo].init()
+    mut f = Foo()
+    f.n = 42
+    b.add(f)
+    print(b.count())
+    print(b.items.get(0).n)

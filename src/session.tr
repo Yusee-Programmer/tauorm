@@ -1,0 +1,171 @@
+# tauorm.session — Session[T, C, RS]: an identity map plus a minimal unit
+# of work over a single Mapper[T]/Engine[C, RS] pair.
+#
+# Scope, deliberately narrow for this phase (see PROPOSAL.md): single-
+# table entities only (no relationships -- Phase 4), a single-column
+# integer "id" primary key (see mapped.tr's convention), and EXPLICIT
+# dirty tracking (`session.mark_dirty(obj)`) rather than SQLAlchemy's
+# transparent attribute-change interception -- Tauraro has no
+# `__setattr__`-style hook to detect a plain field write, so silently
+# "discovering" dirty objects at flush/commit time the way SQLAlchemy
+# does isn't something this phase can honestly claim without either
+# wrapping every field in a property (a much bigger, separate design) or
+# diffing against a snapshot (a later phase, not this one).
+#
+# Every execute() result gets `.next()` called once before release(),
+# CREATE/INSERT/UPDATE/DELETE included -- see engine.tr/dbapi_shared.tr's
+# header comments: SQLite's execute() only prepares + binds; the
+# statement doesn't actually run until stepped at least once.
+
+from dbapi import DbConnection, DbResultSet
+from db_error import DbError
+from engine import Engine
+from mapper import Mapper
+from expression import col, lit, eq
+from select_stmt import select_from
+from insert_stmt import insert
+from update_stmt import update
+from delete_stmt import delete
+from std.core.vec import Vec
+from std.core.map import Map
+
+pub class Session[T, C: DbConnection[RS], RS: DbResultSet]:
+    pub engine:    Engine[C, RS]
+    pub mapper:    Mapper[T]
+    pub dialect:   str
+    pub identity:  Map[str, T]
+    pub new_objs:  Vec[T]
+    pub dirty_objs: Vec[T]
+    pub deleted_keys: Vec[str]
+
+extend Session[T, C, RS]:
+    pub def init[T, C, RS](engine: Engine[C, RS], mapper: Mapper[T], dialect: str) -> Session[T, C, RS]:
+        mut s = Session[T, C, RS]()
+        s.engine = engine
+        s.mapper = mapper
+        s.dialect = dialect
+        s.identity = Map[str, T].init(16)
+        s.new_objs = Vec[T].init(4)
+        s.dirty_objs = Vec[T].init(4)
+        s.deleted_keys = Vec[str].init(4)
+        return s
+
+    # Load by primary key "id", checking the identity map first. Raises a
+    # DbError with code "NOT_FOUND" if no row has that id -- Tauraro's
+    # generic Result/Option representation boxes a payload as a raw
+    # pointer, which doesn't extend to NESTING Option[T] inside Result
+    # (Option itself is a tagged-union VALUE, not a pointer -- confirmed
+    # directly: `Result[Option[T], DbError]` fails C codegen with "cannot
+    # convert to a pointer type"), so this follows the same not-found
+    # idiom Table.col() already uses (`raise()` a described error) rather
+    # than introducing Option, which nothing else in tauorm uses.
+    pub def get(self, id: int) throws DbError -> T:
+        mut key = id.to_str()
+        if self.identity.contains(key):
+            return self.identity.get(key)
+        mut sel = select_from(self.mapper.table).where(eq(col("id"), lit(key))).compile(self.dialect)
+        mut r: Result[RS, DbError] = self.engine.execute(sel.sql, sel.params)
+        if r.is_err:
+            raise(DbError.init(r.err.code, r.err.message))
+        mut rs = r.ok
+        mut step: Result[bool, DbError] = rs.next()
+        if step.is_err:
+            raise(DbError.init(step.err.code, step.err.message))
+        if not step.ok:
+            rs.release()
+            raise(DbError.init("NOT_FOUND", "no row with id " + key))
+        mut obj = self.mapper.load(rs)
+        rs.release()
+        self.identity.insert(key, obj)
+        return obj
+
+    # Register a new, not-yet-persisted object. Written on the next commit().
+    pub def add(self, obj: T):
+        self.new_objs.push(obj)
+
+    # Mark an already-persisted (already `get()`-ed or committed) object as
+    # changed; its current field values are written on the next commit().
+    pub def mark_dirty(self, obj: T):
+        self.dirty_objs.push(obj)
+
+    # Mark a row for deletion by its mapper-derived key. Removed from the
+    # identity map immediately (further get()s must not return it), the
+    # actual DELETE runs on the next commit().
+    pub def delete(self, obj: T):
+        mut key = self.mapper.key_of(obj)
+        self.deleted_keys.push(key)
+        if self.identity.contains(key):
+            self.identity.remove(key)
+
+    def _col_names(self) -> Vec[str]:
+        mut names: Vec[str] = Vec[str].init(self.mapper.table.columns.len)
+        mut i = 0
+        while i < self.mapper.table.columns.len:
+            names.push(self.mapper.table.columns.get(i).name)
+            i = i + 1
+        return names
+
+    # Writes every pending new/dirty/deleted object registered since the
+    # last commit(), in that order, then clears the pending lists. Newly
+    # inserted rows are added to the identity map so an immediate get()
+    # for the same id is a cache hit, not a second round trip.
+    pub def commit(self) throws DbError -> bool:
+        mut names = self._col_names()
+
+        mut i = 0
+        while i < self.new_objs.len:
+            mut obj = self.new_objs.get(i)
+            mut vals = self.mapper.dump(obj)
+            mut ins = insert(self.mapper.table).values(names, vals).compile(self.dialect)
+            mut r: Result[RS, DbError] = self.engine.execute(ins.sql, ins.params)
+            if r.is_err:
+                raise(DbError.init(r.err.code, r.err.message))
+            mut rs = r.ok
+            mut step: Result[bool, DbError] = rs.next()
+            if step.is_err:
+                raise(DbError.init(step.err.code, step.err.message))
+            rs.release()
+            self.identity.insert(self.mapper.key_of(obj), obj)
+            i = i + 1
+        self.new_objs = Vec[T].init(4)
+
+        mut j = 0
+        while j < self.dirty_objs.len:
+            mut dobj = self.dirty_objs.get(j)
+            mut dvals = self.mapper.dump(dobj)
+            mut dkey = self.mapper.key_of(dobj)
+            mut upd = update(self.mapper.table).set(names, dvals).where(eq(col("id"), lit(dkey))).compile(self.dialect)
+            mut r2: Result[RS, DbError] = self.engine.execute(upd.sql, upd.params)
+            if r2.is_err:
+                raise(DbError.init(r2.err.code, r2.err.message))
+            mut rs2 = r2.ok
+            mut step2: Result[bool, DbError] = rs2.next()
+            if step2.is_err:
+                raise(DbError.init(step2.err.code, step2.err.message))
+            rs2.release()
+            j = j + 1
+        self.dirty_objs = Vec[T].init(4)
+
+        mut k = 0
+        while k < self.deleted_keys.len:
+            mut dkey2 = self.deleted_keys.get(k)
+            mut del = delete(self.mapper.table).where(eq(col("id"), lit(dkey2))).compile(self.dialect)
+            mut r3: Result[RS, DbError] = self.engine.execute(del.sql, del.params)
+            if r3.is_err:
+                raise(DbError.init(r3.err.code, r3.err.message))
+            mut rs3 = r3.ok
+            mut step3: Result[bool, DbError] = rs3.next()
+            if step3.is_err:
+                raise(DbError.init(step3.err.code, step3.err.message))
+            rs3.release()
+            k = k + 1
+        self.deleted_keys = Vec[str].init(4)
+        return true
+
+    # Discards pending, not-yet-committed new/dirty/delete registrations.
+    # This is Session's OWN bookkeeping only -- it does not touch a
+    # database transaction; pair with engine.begin()/rollback() for that.
+    pub def rollback(self):
+        self.new_objs = Vec[T].init(4)
+        self.dirty_objs = Vec[T].init(4)
+        self.deleted_keys = Vec[str].init(4)

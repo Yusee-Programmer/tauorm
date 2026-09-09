@@ -1,0 +1,27 @@
+# Re-verify the original bug repro: a generic method whose parameter type
+# is exactly the class's own generic T, chaining a method call after a
+# duck-typed field access (obj.id.to_str()).
+
+class Foo:
+    pub n: int
+
+class Bar:
+    pub s: str
+
+class Cache[T]:
+    pub dummy: int
+
+extend Cache[T]:
+    pub def init[T]() -> Cache[T]:
+        mut c = Cache[T]()
+        c.dummy = 0
+        return c
+
+    pub def key_of[T](self, obj: T) -> str:
+        return obj.n.to_str()
+
+def main():
+    mut c: Cache[Foo] = Cache[Foo].init()
+    mut f = Foo()
+    f.n = 42
+    print(c.key_of(f))

@@ -1,0 +1,21 @@
+# Isolate: does referencing a class's static method as a bare value (not
+# immediately called) work AT ALL, even with no generics involved?
+
+class Foo:
+    pub n: int
+
+extend Foo:
+    pub def make(n: int) -> Foo:
+        mut f = Foo()
+        f.n = n
+        return f
+
+def apply(fn: def(int) -> Foo, n: int) -> Foo:
+    return fn(n)
+
+def main():
+    mut g: def(int) -> Foo = Foo.make
+    mut f1 = g(5)
+    print(f1.n)
+    mut f2 = apply(Foo.make, 6)
+    print(f2.n)

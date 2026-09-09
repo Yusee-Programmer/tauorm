@@ -1,0 +1,118 @@
+# tauorm.mapped — @mapped: a compile-time macro (see tauraro's
+# docs/lang/advanced/10_macros.md) that derives the row<->object mapping
+# boilerplate from a class's plain `pub name: type` fields, so a
+# declarative-style entity needs zero hand-written mapping code:
+#
+#   @mapped
+#   class User:
+#       pub id: int
+#       pub name: str
+#
+# generates, via `extend User:`, four STATIC methods (none take `self` --
+# see below for why) -- `__table() -> Table` (schema, one Column per
+# field), `from_row(rs: DbResultSet) -> User` (positional column read
+# matching field declaration order), `dump(obj: User) -> Vec[str]`
+# (positional param values for INSERT/UPDATE), and `key_of(obj: User) ->
+# str` (primary-key string, for the identity map) -- all four referenced
+# directly as `User.from_row`/`User.dump`/`User.key_of` bare `def(...)->R`
+# VALUES when constructing a `Mapper[User]` (see mapper.tr), with no
+# intermediate top-level wrapper functions needed.
+#
+# Why STATIC methods (`dump(obj: User)`, not `to_values(self)`) and not
+# top-level functions: tauraroc has no notion of constructing a generic
+# `T()` or resolving `T.static_method()` through a bare, unbound type
+# parameter, ruling out a fully generic Mapper[T]/Session[T] calling
+# `T.from_row(...)`/`T()` directly (confirmed directly: both hard errors/
+# miscompiles, independent of tauorm) -- so the concrete entity type has
+# to hand in an already-monomorphized `def(...)->R` VALUE instead. A
+# class's own STATIC method referenced as a bare value (`User.from_row`,
+# no call) works correctly; an INSTANCE method (`self`-taking) does not
+# have an equivalent "unbound method" form to reference the same way, so
+# `dump`/`key_of` take the object as an explicit first parameter instead
+# of using `self`. A macro-generated TOP-LEVEL (non-`extend`) `pub def`
+# was tried first and rejected: tauraroc emits its prototype correctly
+# (call sites resolve, `--check` passes) but never emits the function's
+# BODY into any compiled `.c` file, an undefined-reference LINK error --
+# confirmed directly with a minimal, `@mapped`-unrelated macro repro.
+# `extend`-block output doesn't have this gap (matches the tauraro repo's
+# own `@derive_eq`/`@derive_clone` macro tests), so this design uses only
+# that.
+#
+# Supported field types: int, str, float, bool. A field literally named
+# "id" of type int is treated as the single-column primary key (the same
+# convention Django/Rails use): tauraro's macro `item` reflection exposes
+# only a field's name+type, not per-field decorators/defaults (see
+# macros.tr's `build_item`), so there's no way for a macro alone to read
+# an explicit `@pk`-style per-field annotation -- this convention is the
+# honest alternative rather than inventing reflection the compiler doesn't
+# expose. Composite/non-"id" primary keys aren't supported by @mapped --
+# build the Table by hand (Phase 2's Table/Column) for those.
+#
+# Callers must import what the generated code references, since a macro's
+# output is spliced into and type-checked as part of the SAME file it's
+# attached to, resolving names from THAT file's own imports (see
+# tests/test_mapped_sqlite.tr):
+#   from std.core.vec import Vec
+#   from table import Table
+#   from column import Column
+#   from col_types import Integer, Text, Float, Boolean
+#   from dbapi import DbResultSet
+
+macro def mapped(c) -> code:
+    mut cols = ""
+    mut froms = ""
+    mut tos = ""
+    mut idx = 0
+    for f in c.fields:
+        if f.type == "int":
+            if f.name == "id":
+                cols = cols + f"""        cols.push(Column.init("{f.name}", Integer()).pk())
+"""
+            else:
+                cols = cols + f"""        cols.push(Column.init("{f.name}", Integer()))
+"""
+            froms = froms + f"""        out.{f.name} = rs.get_int({idx})
+"""
+            tos = tos + f"""        v.push(obj.{f.name}.to_str())
+"""
+        elif f.type == "float":
+            cols = cols + f"""        cols.push(Column.init("{f.name}", Float()))
+"""
+            froms = froms + f"""        out.{f.name} = rs.get_float({idx})
+"""
+            tos = tos + f"""        v.push(obj.{f.name}.to_str())
+"""
+        elif f.type == "bool":
+            cols = cols + f"""        cols.push(Column.init("{f.name}", Boolean()))
+"""
+            froms = froms + f"""        out.{f.name} = rs.get_bool({idx})
+"""
+            tos = tos + f"""        v.push(obj.{f.name}.to_str())
+"""
+        elif f.type == "str":
+            cols = cols + f"""        cols.push(Column.init("{f.name}", Text()))
+"""
+            froms = froms + f"""        out.{f.name} = rs.get_str({idx})
+"""
+            tos = tos + f"""        v.push(obj.{f.name})
+"""
+        else:
+            return macro_error(f"@mapped: unsupported field type '{f.type}' on {c.name}.{f.name} (supported: int, str, float, bool)")
+        idx = idx + 1
+    mut n = c.fields.len()
+    return f"""extend {c.name}:
+    pub def __table() -> Table:
+        mut cols: Vec[Column] = Vec[Column].init({n})
+{cols}        return Table.init("{c.name}", cols)
+
+    pub def from_row(rs: DbResultSet) -> {c.name}:
+        mut out = {c.name}()
+{froms}        return out
+
+    pub def dump(obj: {c.name}) -> Vec[str]:
+        mut v: Vec[str] = Vec[str].init({n})
+{tos}        return v
+
+    pub def key_of(obj: {c.name}) -> str:
+        return obj.id.to_str()
+"""

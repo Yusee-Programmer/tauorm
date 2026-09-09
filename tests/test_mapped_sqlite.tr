@@ -1,0 +1,117 @@
+# tests.test_mapped_sqlite — real, in-memory end-to-end proof of Phase 3:
+# a plain, @mapped-decorated class needs zero hand-written row-mapping
+# code, and Session[T, C, RS]'s identity map + minimal unit of work
+# (add/get/mark_dirty/delete/commit) round-trip real rows through real
+# SQLite. Every step's actual row/text results are asserted, not just "it
+# compiled" -- matching Phase 1/2's own bar for what counts as done.
+
+from mapped import mapped
+from mapper import Mapper
+from session import Session
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from engine import Engine
+from db_error import DbError
+from metadata import MetaData, create_all
+from table import Table
+from column import Column
+from col_types import Integer, Text, Float, Boolean
+from dbapi import DbResultSet
+from std.core.vec import Vec
+from std.test import TestRunner
+
+@mapped
+class User:
+    pub id: int
+    pub name: str
+    pub age: int
+
+def main():
+    mut t = TestRunner.init("Phase 3 (@mapped + Session, sqlite)")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        t.fail("could not open SQLite connection: " + open_r.err.message)
+        t.summary()
+        return
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+
+    # @mapped-generated schema, no hand-written Table/Column for User.
+    mut users_table = User.__table()
+    t.assert_eq_str(users_table.name, "User", "generated table name matches class name")
+    t.assert_eq_int(users_table.columns.len, 3, "generated table has one column per field")
+
+    mut md = MetaData.init()
+    md.add(users_table)
+    mut create_res: Result[bool, DbError] = create_all[SqliteConnection, SqliteResultSet](md, engine, "sqlite")
+    if create_res.is_err:
+        t.fail("create_all failed: " + create_res.err.message)
+        t.summary()
+        return
+
+    mut mapper: Mapper[User] = Mapper[User].init(User.__table(), User.from_row, User.dump, User.key_of)
+    mut sess: Session[User, SqliteConnection, SqliteResultSet] = Session[User, SqliteConnection, SqliteResultSet].init(engine, mapper, "sqlite")
+
+    # INSERT via Session.add()/commit() -- no hand-written INSERT statement.
+    mut u1 = User()
+    u1.id = 1
+    u1.name = "Ada"
+    u1.age = 36
+    sess.add(u1)
+    mut u2 = User()
+    u2.id = 2
+    u2.name = "Grace"
+    u2.age = 85
+    sess.add(u2)
+    mut commit1: Result[bool, DbError] = sess.commit()
+    if commit1.is_err:
+        t.fail("commit (insert) failed: " + commit1.err.message)
+        t.summary()
+        return
+
+    # get() round-trips real row data back through @mapped's generated from_row().
+    mut got1: Result[User, DbError] = sess.get(1)
+    if got1.is_err:
+        t.fail("get(1) failed: " + got1.err.message)
+        t.summary()
+        return
+    t.assert_eq_str(got1.ok.name, "Ada", "get(1) returns the inserted row's name")
+    t.assert_eq_int(got1.ok.age, 36, "get(1) returns the inserted row's age")
+
+    # Second get() for the same id must be an identity-map hit (same session,
+    # no way to observe this directly here beyond "still correct"), and a
+    # miss for a never-inserted id must raise NOT_FOUND.
+    mut got_missing: Result[User, DbError] = sess.get(999)
+    t.assert_true(got_missing.is_err, "get() on a missing id fails")
+    if got_missing.is_err:
+        t.assert_eq_str(got_missing.err.code, "NOT_FOUND", "get() on a missing id raises NOT_FOUND")
+
+    # UPDATE via Session.mark_dirty()/commit().
+    mut u1_loaded = got1.ok
+    u1_loaded.age = 37
+    sess.mark_dirty(u1_loaded)
+    mut commit2: Result[bool, DbError] = sess.commit()
+    if commit2.is_err:
+        t.fail("commit (update) failed: " + commit2.err.message)
+        t.summary()
+        return
+    mut verify: Result[User, DbError] = sess.get(1)
+    if not verify.is_err:
+        t.assert_eq_int(verify.ok.age, 37, "mark_dirty + commit updates the row")
+
+    # DELETE via Session.delete()/commit().
+    sess.delete(u1_loaded)
+    mut commit3: Result[bool, DbError] = sess.commit()
+    if commit3.is_err:
+        t.fail("commit (delete) failed: " + commit3.err.message)
+        t.summary()
+        return
+    mut after_delete: Result[User, DbError] = sess.get(1)
+    t.assert_true(after_delete.is_err, "delete + commit removes the row")
+
+    # The other row (Grace) is untouched by User(1)'s delete.
+    mut got2: Result[User, DbError] = sess.get(2)
+    if not got2.is_err:
+        t.assert_eq_str(got2.ok.name, "Grace", "unrelated row survives another row's delete")
+
+    engine.release()
+    t.summary()

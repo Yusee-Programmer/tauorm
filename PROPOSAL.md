@@ -468,6 +468,133 @@ in-progress past a 5-minute wait rather than actually stuck) -- not
 compiler bugs; resolved by killing stale processes and/or simply waiting
 longer before concluding a run had failed.
 
+**Phase 3 (declarative mapping + Session) is done and verified for
+real** -- `test_mapped_sqlite.tr` defines a plain `@mapped class User:`
+(zero hand-written row-mapping code), then exercises `Session[User,
+SqliteConnection, SqliteResultSet]`'s identity map and unit of work
+(`add`/`get`/`mark_dirty`/`delete`/`commit`) through a full add-insert,
+get-round-trip, identity-map-hit-on-repeat-get, update, delete, and
+unrelated-row-survives-delete sequence against real in-memory SQLite (9
+assertions, all passing).
+
+The design took a real detour first. The user corrected an earlier
+(wrong) assessment that Tauraro has no macro system and therefore no way
+to support declarative mapping — it has a genuine one (`macro def
+name(item) -> code:`, see `~/tauraro/docs/lang/advanced/10_macros.md`): a
+compile-time function that receives a reflection of the class it's
+attached to (`item.fields` — name+type pairs — for a class) and returns
+Tauraro source text the compiler parses and splices in before sema, so
+generated code is fully type/borrow-checked like anything else. `@mapped`
+(`mapped.tr`) uses exactly this to generate `__table()`/`from_row()`/
+`dump()`/`key_of()` from a class's plain fields.
+
+Getting from "the macro system exists" to "a working generic
+`Mapper[T]`/`Session[T]`" surfaced **7 more real `tauraroc` bugs** this
+session (in addition to the 4 fixed closing out Phase 1/2, see above), all
+found via minimal, ORM-unrelated repros before touching tauorm code, and
+all fixed at the root in `~/tauraro/src/{sema.tr,codegen/c.tr}`, verified
+via a gen1->gen2->gen3 self-hosting fixpoint (byte-identical generated C)
+and the full `tests/lang`+`tests/regression` suite (no regressions; 3
+pre-existing, unrelated failures — `fmt` idempotency on two example files,
+one `cdylib` test — reproduced identically against the untouched original
+compiler, so not something introduced here). In the order found:
+
+1. A generic METHOD whose own `[T]` merely repeats its enclosing class's
+   OWN generic parameter (`class Bag[T]: ... def add[T](self, obj: T):`,
+   the pattern the generics docs require) was wrongly routed through the
+   machinery meant for a method with a genuinely independent generic on an
+   otherwise non-generic class (`Wrapper.echo[T]`), emitting a bogus
+   `<Cls>_<method>__MONO_<targ>` forward declaration typed `Cls* self` --
+   `Cls` being the bare, un-monomorphized name, undeclared. Fixed by
+   skipping that path whenever the class itself is already generic (the
+   class-level monomorphization already covers those methods correctly).
+2. `T.static_method(args)` through a generic type parameter (`T` in
+   `def build[T](n: int) -> T: return T.make(n)`) miscompiled to a call to
+   an undeclared global function (`make(T, n)`, "T" undeclared) --
+   `class_name` resolution for a static call fell back to nothing for a
+   bare, in-scope type-parameter receiver. Fixed by resolving it through
+   the active `type_subst` substitution at the two places that recover a
+   static call's class name and its static-vs-instance check.
+3. `T()` (default-constructing a generic type parameter to its
+   eventual concrete type) was rejected outright at sema ("name 'T' is
+   not defined"), never reaching codegen. Fixed by recognizing an in-scope
+   type parameter as a legitimate bare name and by resolving it through
+   `type_subst` in construction codegen.
+4. `ClassName.method` referenced as a bare VALUE (no immediate call --
+   e.g. assigned to a `def(...)->R` local, or passed as a callback
+   argument) miscompiled to `ClassName->method`, as if `ClassName` held an
+   instance -- the immediate-call form (`ClassName.method(args)`) was
+   already correct via a separate path and unaffected. Fixed by adding
+   sema lowering for this case to a proper qualified-function-value
+   reference, plus codegen wrapping it into the same `TrFnVal` struct an
+   ordinary top-level function reference already gets.
+5. `obj.field.method()` chained off a duck-typed, generic-parameter-typed
+   receiver (`obj: T` inside a generic function) silently dropped the
+   `.method()` call, returning the raw field where the method's result was
+   expected (e.g. `obj.n.to_str()` compiling to plain `obj->n`, an `int`
+   where a `TrStr` was expected). Fixed the "unresolved property-access
+   type" codegen fallback to also resolve through `type_subst` before
+   giving up, not just when the type was already empty.
+6. A "callable FIELD call" (`obj.f(args)` where `f: def(...)->T` is a
+   FIELD, not a method — Mapper[T]'s `load`/`dump`/`key_of` fields'
+   exact shape) never substituted the field's declared (always-generic)
+   return type through the receiver's own concrete type args, unlike the
+   adjacent method-call case a few lines above, which already did.
+   Reproduced directly (`h.maker(42)` on a `Holder[Foo]` emitting `T* f =
+   ...`, "unknown type name 'T'"). Fixed by applying the same
+   `_subst_ret_generics` substitution there.
+7. A local variable assigned from a monomorphized generic class's OWN
+   method call (`mut f = h.build(42)`, `h: Holder[Foo]`, `build(self, n:
+   int) -> T`) was auto-dropped at scope exit using the RECEIVER's
+   monomorphized drop function (`_trdrop_Holder_Foo`) instead of its OWN
+   type's (`_trdrop_Foo`) -- undefined reference, a link error. Root
+   cause: a fallback specifically meant for a "factory" shape (`mut h =
+   Holder[int].make(5)`, where the call's OWN result type genuinely IS the
+   same generic class as the receiver, just missing its type args in the
+   HIR) didn't check that the result and receiver types actually matched
+   before applying, so it fired just as wrongly for `h.build(42)`
+   returning an unrelated type. Fixed by adding that check.
+
+One more was found but deliberately NOT fixed, in favor of a clean
+design workaround: a macro-generated PLAIN TOP-LEVEL `pub def` (spliced
+outside any `extend` block) gets its prototype correctly declared and
+call sites resolve fine (`--check` passes), but its function BODY is
+never emitted into any compiled `.c` file -- an undefined-reference link
+error, reproduced with a minimal macro unrelated to tauorm. Root-causing
+this would mean tracing how `expand_macros`-spliced declarations relate
+to the resolver's own per-module decl tracking (built BEFORE macro
+expansion runs), a materially bigger and less contained change than the
+seven above. `@mapped` sidesteps it entirely by generating only
+`extend`-block STATIC methods (`User.from_row`, `User.dump`, `User.
+key_of`, referenced directly as bare `def(...)->R` values via fix #4
+above) rather than top-level wrapper functions -- `extend`-block macro
+output was already proven solid by tauraro's own `@derive_eq`/
+`@derive_clone` tests, so this isn't a workaround so much as staying on
+the well-tested path.
+
+`Mapper[T]`/`Session[T]`'s design is a direct consequence of what's
+and isn't possible here: Tauraro's generics have no way to construct a
+generic `T()` or call `T.static_method()` through a bare, unbound type
+parameter (bug #3 above is the closest it gets, and that's a hard error,
+by design — not something a future fix should change, since there's no
+notion of "T must be default-constructible" a caller could opt into). A
+classic SQLAlchemy-style `Session` that internally does `T.from_row(row)`
+or `T()` for an arbitrary mapped type is therefore not implementable as
+written; `Mapper[T]` instead carries `load`/`dump`/`key_of` as `def(...)
+->R` VALUES, each a `@mapped`-generated static method referenced directly
+(fix #4's mechanism) — fully generic and reusable across any `@mapped`
+entity, without Session ever needing to construct or call through a bare
+`T`.
+
+Scope is deliberately narrow, matching a real v1: single-table entities
+only (no relationships — Phase 4), a single-column integer `id` primary
+key by convention (Django/Rails do the same; Tauraro's macro `item`
+reflection exposes a field's name+type only, not per-field decorators, so
+there's no way to read an explicit `@pk` annotation — see `mapped.tr`'s
+header comment), and EXPLICIT dirty tracking (`session.mark_dirty(obj)`)
+rather than SQLAlchemy's transparent attribute-change interception, which
+Tauraro has no hook (`__setattr__`-equivalent) to implement honestly.
+
 ## What's deferred, and why
 
 - **Migrations** (an Alembic equivalent — versioned schema changes,
@@ -513,9 +640,10 @@ longer before concluding a run had failed.
    until then either) -- reasonable to pick up alongside Phase 4
    (relationships) when there's a concrete need driving their design,
    rather than speculatively now.
-3. **Phase 3 — ORM mapping + sync Session.** Declarative base, `Mapper`,
-   identity map, a unit of work that handles single-table insert/update/
-   delete ordering. No relationships yet.
+3. **Phase 3 — ORM mapping + sync Session.** `@mapped` declarative
+   entities, `Mapper[T]`, an identity map, and a unit of work handling
+   single-table insert/update/delete ordering: **done, see Status.**
+   No relationships yet.
 4. **Phase 4 — Relationships.** one-to-many/many-to-one/one-to-one,
    many-to-many via association tables, lazy vs. joined loading.
 5. **Phase 5 — Async.** `AsyncEngine`/`AsyncConnection`/`AsyncSession` per

@@ -1,0 +1,31 @@
+# Repro: can a class's STATIC method be passed around as a plain function
+# value (def(...)->R), stored in a generic struct field, and called later?
+# This is the fallback design for Mapper[T]/Session[T] since T.method()
+# through a bare generic type param doesn't codegen correctly (see
+# repro_static_via_generic.tr).
+
+class Foo:
+    pub n: int
+
+extend Foo:
+    pub def make(n: int) -> Foo:
+        mut f = Foo()
+        f.n = n
+        return f
+
+class Holder[T]:
+    pub maker: def(int) -> T
+
+extend Holder:
+    pub def init[T](maker: def(int) -> T) -> Holder[T]:
+        mut h = Holder[T]()
+        h.maker = maker
+        return h
+
+    pub def build(self, n: int) -> T:
+        return self.maker(n)
+
+def main():
+    mut h: Holder[Foo] = Holder[Foo].init(Foo.make)
+    mut f = h.build(42)
+    print(f.n)

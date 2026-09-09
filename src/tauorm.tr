@@ -20,10 +20,22 @@
 #
 #   mut engine = Engine[PostgresConnection, PostgresResultSet].wrap(PostgresConnection.open(conninfo)?)
 #
-# STATUS: Phase 1 (Core dialect boundary + Engine) and Phase 2 (SQL
-# expression language + schema) done -- see PROPOSAL.md's Status section.
-# The ORM (sessions, declarative mapping, relationships) from
-# PROPOSAL.md's later phases is not built yet.
+# STATUS: Phase 1 (Core dialect boundary + Engine), Phase 2 (SQL
+# expression language + schema), and Phase 3 (@mapped declarative
+# entities + Mapper/Session) done -- see PROPOSAL.md's Status section.
+# Relationships/async from PROPOSAL.md's later phases are not built yet.
+#
+# Declarative mapping:
+#
+#   from tauorm import mapped, Mapper, Session
+#
+#   @mapped
+#   class User:
+#       pub id: int
+#       pub name: str
+#
+#   mut mapper: Mapper[User] = Mapper[User].init(User.__table(), User.from_row, User.dump, User.key_of)
+#   mut sess: Session[User, SqliteConnection, SqliteResultSet] = Session[User, SqliteConnection, SqliteResultSet].init(engine, mapper, "sqlite")
 
 from db_error import DbError
 from dbapi import DbConnection, DbResultSet
@@ -40,3 +52,7 @@ from select_stmt import Select, select_from
 from insert_stmt import Insert, insert
 from update_stmt import Update, update
 from delete_stmt import Delete, delete
+
+from mapped import mapped
+from mapper import Mapper
+from session import Session

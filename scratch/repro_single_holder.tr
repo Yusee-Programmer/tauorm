@@ -1,0 +1,29 @@
+# Isolate: is the missing-drop-fn bug about "only ONE instantiation of the
+# generic class in the whole program" rather than about static-method
+# values specifically? Same as repro_wrapper_fnptr.tr but with only Foo,
+# no Bar/second instantiation.
+
+class Foo:
+    pub n: int
+
+def __wrap_foo(n: int) -> Foo:
+    mut f = Foo()
+    f.n = n
+    return f
+
+class Holder[T]:
+    pub maker: def(int) -> T
+
+extend Holder:
+    pub def init[T](maker: def(int) -> T) -> Holder[T]:
+        mut h = Holder[T]()
+        h.maker = maker
+        return h
+
+    pub def build(self, n: int) -> T:
+        return self.maker(n)
+
+def main():
+    mut h: Holder[Foo] = Holder[Foo].init(__wrap_foo)
+    mut f = h.build(42)
+    print(f.n)

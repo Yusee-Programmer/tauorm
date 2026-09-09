@@ -1,0 +1,33 @@
+# tauorm.mapper — Mapper[T]: binds a @mapped entity's generated table
+# schema and row<->object functions (see mapped.tr) together into one
+# generic, reusable value that Session[T, ...] (session.tr) operates on
+# without needing to know the concrete entity type beyond its own [T].
+#
+# `load`/`dump`/`key_of` are plain `def(...)->R` FUNCTION VALUES -- see
+# mapped.tr's header comment for why they're @mapped's generated STATIC
+# methods referenced directly (`User.from_row`, `User.dump`, `User.
+# key_of`), not called through `T` itself: tauraroc has no way to
+# construct a generic `T()` or resolve `T.static_method()` through a
+# bare, unbound type parameter, so a fully generic Mapper[T]/Session[T]
+# can never call through `T` itself -- it can only ever invoke a
+# `def(...)->R` value that's already been monomorphized to the concrete
+# entity type by whoever constructed this Mapper[T].
+
+from table import Table
+from dbapi import DbResultSet
+from std.core.vec import Vec
+
+pub class Mapper[T]:
+    pub table:  Table
+    pub load:   def(DbResultSet) -> T
+    pub dump:   def(T) -> Vec[str]
+    pub key_of: def(T) -> str
+
+extend Mapper[T]:
+    pub def init[T](table: Table, load: def(DbResultSet) -> T, dump: def(T) -> Vec[str], key_of: def(T) -> str) -> Mapper[T]:
+        mut m = Mapper[T]()
+        m.table = table
+        m.load = load
+        m.dump = dump
+        m.key_of = key_of
+        return m

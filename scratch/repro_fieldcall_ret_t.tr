@@ -1,0 +1,25 @@
+# Does assigning the result of calling a def(...)->T FIELD (a stored
+# function pointer, not a method) to a local var trip the auto-drop
+# confusion? This is exactly Mapper[T].load's shape in tauorm's session.tr.
+
+class Foo:
+    pub n: int
+
+def make_foo(n: int) -> Foo:
+    mut f = Foo()
+    f.n = n
+    return f
+
+class Holder[T]:
+    pub maker: def(int) -> T
+
+extend Holder:
+    pub def init[T](maker: def(int) -> T) -> Holder[T]:
+        mut h = Holder[T]()
+        h.maker = maker
+        return h
+
+def main():
+    mut h: Holder[Foo] = Holder[Foo].init(make_foo)
+    mut f = h.maker(42)
+    print(f.n)

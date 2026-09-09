@@ -1,0 +1,50 @@
+# Repro: a TOP-LEVEL wrapper function (not a class's static method) that
+# internally calls a class's static method, passed BY NAME as a
+# def(...)->R value into a generic struct. This sidesteps the
+# "ClassName.method referenced as a bare value" bug (repro_static_fnptr_plain.tr)
+# since top-level functions-as-values are already proven (see docs'
+# Vec[def(int)->int] example).
+
+class Foo:
+    pub n: int
+
+extend Foo:
+    pub def make(n: int) -> Foo:
+        mut f = Foo()
+        f.n = n
+        return f
+
+class Bar:
+    pub s: str
+
+extend Bar:
+    pub def make(n: int) -> Bar:
+        mut b = Bar()
+        b.s = "bar:" + n.to_str()
+        return b
+
+def __wrap_foo(n: int) -> Foo:
+    return Foo.make(n)
+
+def __wrap_bar(n: int) -> Bar:
+    return Bar.make(n)
+
+class Holder[T]:
+    pub maker: def(int) -> T
+
+extend Holder:
+    pub def init[T](maker: def(int) -> T) -> Holder[T]:
+        mut h = Holder[T]()
+        h.maker = maker
+        return h
+
+    pub def build(self, n: int) -> T:
+        return self.maker(n)
+
+def main():
+    mut hf: Holder[Foo] = Holder[Foo].init(__wrap_foo)
+    mut f = hf.build(42)
+    print(f.n)
+    mut hb: Holder[Bar] = Holder[Bar].init(__wrap_bar)
+    mut b = hb.build(7)
+    print(b.s)

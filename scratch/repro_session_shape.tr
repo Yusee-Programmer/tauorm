@@ -1,0 +1,67 @@
+# Repro: the exact shape Session[T,...] needs -- a generic class holding
+# Map[str, T] (identity map) and a def(DbResultSet-like)->T loader, where a
+# generic METHOD reads a field literally named "id" off a bare, UNBOUNDED
+# generic T (duck-typed: only checked when monomorphized against a concrete
+# type that actually has that field, per docs/lang/11_generics.md's "Type
+# Constraints with where" section: "Without a where clause, any type can be
+# substituted, and type mismatches only surface as C compile errors").
+
+from std.core.map import Map
+from std.core.vec import Vec
+
+class User:
+    pub id: int
+    pub name: str
+
+class Product:
+    pub id: int
+    pub price: float
+
+def make_user(n: int) -> User:
+    mut u = User()
+    u.id = n
+    u.name = "user" + n.to_str()
+    return u
+
+def make_product(n: int) -> Product:
+    mut p = Product()
+    p.id = n
+    p.price = 1.5 * n.to_str().len().to_str().len()  # dummy, just needs to compile
+    return p
+
+class Cache[T]:
+    pub identity: Map[str, T]
+    pub loader:   def(int) -> T
+
+extend Cache[T]:
+    pub def init[T](loader: def(int) -> T) -> Cache[T]:
+        mut c = Cache[T]()
+        c.identity = Map[str, T].init(8)
+        c.loader = loader
+        return c
+
+    pub def get[T](self, n: int) -> T:
+        mut key = n.to_str()
+        if self.identity.contains(key):
+            return self.identity.get(key)
+        mut obj = self.loader(n)
+        self.identity.insert(key, obj)
+        return obj
+
+def key_of_user(obj: User) -> str:
+    return obj.id.to_str()
+
+def key_of_product(obj: Product) -> str:
+    return obj.id.to_str()
+
+def main():
+    mut uc: Cache[User] = Cache[User].init(make_user)
+    mut u1 = uc.get(5)
+    print(u1.name)
+    print(key_of_user(u1))
+    mut u2 = uc.get(5)   # identity-map hit, same underlying value
+    print(u2.name)
+
+    mut pc: Cache[Product] = Cache[Product].init(make_product)
+    mut p1 = pc.get(3)
+    print(key_of_product(p1))

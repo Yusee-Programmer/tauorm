@@ -1,0 +1,27 @@
+# Does calling a generic class's OWN method (declared -> T, T being the
+# class's type param) and assigning the result to a local var trip the
+# same auto-drop confusion seen in repro_single_holder.tr (there, a
+# monomorphized method's `-> T` result got auto-dropped using the
+# RECEIVER's drop function instead of T's own)?
+
+class Foo:
+    pub n: int
+
+class Box[T]:
+    pub val: T
+
+extend Box[T]:
+    pub def init[T](v: T) -> Box[T]:
+        mut b = Box[T]()
+        b.val = v
+        return b
+
+    pub def get(self) -> T:
+        return self.val
+
+def main():
+    mut f = Foo()
+    f.n = 9
+    mut bx: Box[Foo] = Box[Foo].init(f)
+    mut got = bx.get()
+    print(got.n)
