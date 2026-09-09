@@ -1,0 +1,62 @@
+# tauorm.col_types — column type descriptors + their per-dialect DDL
+# rendering. A plain "postgres"/"sqlite" string flag threads through
+# rendering rather than a Dialect class/interface hierarchy: Phase 1 found
+# several real tauraroc bugs specific to generic classes with more than
+# one type parameter (see PROPOSAL.md's Status section) -- the type
+# system here has nothing that actually needs to be generic, so there's
+# no reason to invite that risk for a handful of dialect-name string
+# comparisons.
+
+pub class ColumnType:
+    pub kind:   str   # "integer" | "bigint" | "text" | "varchar" | "boolean" | "float" | "datetime"
+    pub length: int   # VarChar's length; 0 = not applicable
+
+extend ColumnType:
+    # The DDL fragment for this type alone (no column name, no constraints)
+    # -- e.g. "VARCHAR(100)" on Postgres, "TEXT" on SQLite (SQLite has no
+    # enforced varchar length; type affinity makes TEXT the honest choice
+    # rather than a VARCHAR(n) it would silently not enforce).
+    pub def ddl(self, dialect: str) -> str:
+        if self.kind == "integer": return "INTEGER"
+        if self.kind == "bigint":
+            if dialect == "postgres": return "BIGINT"
+            return "INTEGER"   # SQLite has no distinct bigint; INTEGER is already 64-bit
+        if self.kind == "text": return "TEXT"
+        if self.kind == "varchar":
+            if dialect == "postgres": return "VARCHAR(" + self.length.to_str() + ")"
+            return "TEXT"
+        if self.kind == "boolean":
+            if dialect == "postgres": return "BOOLEAN"
+            return "INTEGER"   # SQLite has no boolean type; stored 0/1
+        if self.kind == "float": return "REAL"
+        if self.kind == "datetime":
+            if dialect == "postgres": return "TIMESTAMP"
+            return "TEXT"      # SQLite stores datetime as TEXT/REAL/INTEGER; TEXT (ISO8601) is its own documented convention
+        return "TEXT"
+
+def _mk(kind: str, length: int) -> ColumnType:
+    mut t = ColumnType()
+    t.kind = kind
+    t.length = length
+    return t
+
+pub def Integer() -> ColumnType:
+    return _mk("integer", 0)
+
+pub def BigInteger() -> ColumnType:
+    return _mk("bigint", 0)
+
+pub def Text() -> ColumnType:
+    return _mk("text", 0)
+
+pub def VarChar(length: int) -> ColumnType:
+    return _mk("varchar", length)
+
+pub def Boolean() -> ColumnType:
+    return _mk("boolean", 0)
+
+pub def Float() -> ColumnType:
+    return _mk("float", 0)
+
+pub def DateTime() -> ColumnType:
+    return _mk("datetime", 0)

@@ -1,0 +1,16 @@
+# tauorm.sql_compiler — SqlCompiled: the (sql text, ordered params) pair
+# every statement builder (select_stmt.tr etc.) produces, ready to hand
+# straight to Engine.execute(compiled.sql, compiled.params).
+
+from std.core.vec import Vec
+
+pub class SqlCompiled:
+    pub sql:    str
+    pub params: Vec[str]
+
+extend SqlCompiled:
+    pub def init(sql: str, params: Vec[str]) -> SqlCompiled:
+        mut c = SqlCompiled()
+        c.sql = sql
+        c.params = params
+        return c

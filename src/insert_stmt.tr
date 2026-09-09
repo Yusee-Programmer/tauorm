@@ -1,0 +1,46 @@
+# tauorm.insert_stmt — Insert: insert(table).values([names], [values]),
+# compiling to dialect-correct SQL + params.
+
+from table import Table
+from sql_compiler import SqlCompiled
+from std.core.vec import Vec
+
+pub class Insert:
+    pub table:      Table
+    pub col_names:  Vec[str]
+    pub col_values: Vec[str]
+
+extend Insert:
+    pub def init(table: Table) -> Insert:
+        mut ins = Insert()
+        ins.table = table
+        ins.col_names = Vec[str].init(4)
+        ins.col_values = Vec[str].init(4)
+        return ins
+
+    pub def values(self, col_names: Vec[str], col_values: Vec[str]) -> Insert:
+        self.col_names = col_names
+        self.col_values = col_values
+        return self
+
+    pub def compile(self, dialect: str) -> SqlCompiled:
+        mut names = ""
+        mut placeholders = ""
+        mut params: Vec[str] = Vec[str].init(self.col_values.len)
+        mut i = 0
+        while i < self.col_names.len:
+            if i > 0:
+                names = names + ", "
+                placeholders = placeholders + ", "
+            names = names + self.col_names.get(i)
+            params.push(self.col_values.get(i))
+            if dialect == "postgres":
+                placeholders = placeholders + "$" + params.len.to_str()
+            else:
+                placeholders = placeholders + "?"
+            i = i + 1
+        mut sql = "INSERT INTO " + self.table.name + " (" + names + ") VALUES (" + placeholders + ")"
+        return SqlCompiled.init(sql, params)
+
+pub def insert(table: Table) -> Insert:
+    return Insert.init(table)

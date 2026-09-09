@@ -1,9 +1,9 @@
 # tauorm — a SQLAlchemy-style SQL toolkit + ORM for Tauraro. See
 # ../PROPOSAL.md for the full architecture and phased build plan.
 #
-# This hub re-exports ONLY backend-agnostic Core: the DbConnection/
-# DbResultSet interfaces, the shared error type (DbError), and the generic
-# Engine wrapper. It deliberately does NOT import either dialect adapter
+# This hub re-exports backend-agnostic Core (DbConnection/DbResultSet,
+# DbError, Engine) plus Phase 2's schema layer and SQL expression
+# language. It deliberately does NOT import either dialect adapter
 # (postgres_dialect.tr, sqlite_dialect.tr) -- each of those imports a real
 # driver package (postgres/sqlite3), and both are OPTIONAL taupkg
 # dependencies (see taupkg.toml). Importing them unconditionally from here
@@ -13,17 +13,30 @@
 #
 # A consumer imports the backend(s) they built with directly:
 #
-#   from tauorm import DbError, Engine
+#   from tauorm import DbError, Engine, Table, Column, Integer, Text, MetaData
+#   from tauorm import col, lit, eq, select_from, insert, update, delete
 #   from postgres_dialect import PostgresConnection   # --features postgres
 #   from sqlite_dialect import SqliteConnection       # --features sqlite
 #
-#   mut engine = Engine.wrap(PostgresConnection.open(conninfo)?)
+#   mut engine = Engine[PostgresConnection, PostgresResultSet].wrap(PostgresConnection.open(conninfo)?)
 #
-# STATUS: Phase 1 (Core dialect boundary + Engine) done -- see
-# PROPOSAL.md's Status section. The SQL expression language, schema layer,
-# and ORM (sessions, mapping, relationships) from PROPOSAL.md's later
-# phases are not built yet.
+# STATUS: Phase 1 (Core dialect boundary + Engine) and Phase 2 (SQL
+# expression language + schema) done -- see PROPOSAL.md's Status section.
+# The ORM (sessions, declarative mapping, relationships) from
+# PROPOSAL.md's later phases is not built yet.
 
 from db_error import DbError
 from dbapi import DbConnection, DbResultSet
 from engine import Engine
+
+from col_types import ColumnType, Integer, BigInteger, Text, VarChar, Boolean, Float, DateTime
+from column import Column
+from table import Table
+from metadata import MetaData, create_all, drop_all
+
+from expression import SqlExpr, col, lit, eq, ne, lt, gt, le, ge, like, and_, or_, not_, is_null, is_not_null
+from sql_compiler import SqlCompiled
+from select_stmt import Select, select_from
+from insert_stmt import Insert, insert
+from update_stmt import Update, update
+from delete_stmt import Delete, delete

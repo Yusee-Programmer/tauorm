@@ -1,0 +1,159 @@
+# tests.test_phase2_sqlite — real, in-memory end-to-end proof of Phase 2:
+# define a Table, create it via MetaData.create_all(), then INSERT/SELECT/
+# UPDATE/DELETE through the query builders, executed via the Phase 1
+# Engine. Every step's actual row/text results are asserted, not just "it
+# compiled" -- matching Phase 1's own bar for what counts as done.
+
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from engine import Engine
+from db_error import DbError
+from table import Table
+from column import Column
+from col_types import Integer, Text
+from metadata import MetaData, create_all
+from expression import col, lit, eq
+from select_stmt import select_from
+from insert_stmt import insert
+from update_stmt import update
+from delete_stmt import delete
+from std.core.vec import Vec
+from std.test import TestRunner
+
+def main():
+    mut t = TestRunner.init("phase 2 (sqlite dialect)")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        t.fail("could not open SQLite connection: " + open_r.err.message)
+        t.summary()
+        return
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+
+    mut cols: Vec[Column] = Vec[Column].init(2)
+    cols.push(Column.init("id", Integer()).pk())
+    cols.push(Column.init("name", Text()).not_null())
+    mut users = Table.init("users", cols)
+
+    mut md = MetaData.init()
+    md.add(users)
+
+    mut create_res: Result[bool, DbError] = create_all[SqliteConnection, SqliteResultSet](md, engine, "sqlite")
+    if create_res.is_err:
+        t.fail("create_all failed: " + create_res.err.message)
+        t.summary()
+        return
+
+    # INSERT
+    mut ins_names: Vec[str] = Vec[str].init(1)
+    ins_names.push("name")
+    mut ins_vals: Vec[str] = Vec[str].init(1)
+    ins_vals.push("Ada")
+    mut ins_compiled = insert(users).values(ins_names, ins_vals).compile("sqlite")
+    t.assert_eq_str(ins_compiled.sql, "INSERT INTO users (name) VALUES (?)", "insert compiles to expected SQL")
+    mut ins_r: Result[SqliteResultSet, DbError] = engine.execute(ins_compiled.sql, ins_compiled.params)
+    if ins_r.is_err:
+        t.fail("INSERT execute failed: " + ins_r.err.message)
+        t.summary()
+        return
+    mut ins_rs = ins_r.ok
+    mut ins_step: Result[bool, DbError] = ins_rs.next()
+    if ins_step.is_err:
+        t.fail("INSERT did not execute: " + ins_step.err.message)
+        t.summary()
+        return
+    t.assert_eq_int(ins_rs.rows_affected(), 1, "insert affects 1 row")
+    ins_rs.release()
+
+    # SELECT with WHERE
+    mut sel_cols: Vec[str] = Vec[str].init(2)
+    sel_cols.push("id")
+    sel_cols.push("name")
+    mut sel_compiled = select_from(users).cols(sel_cols).where(eq(col("name"), lit("Ada"))).compile("sqlite")
+    t.assert_eq_str(sel_compiled.sql, "SELECT id, name FROM users WHERE (name = ?)", "select compiles to expected SQL")
+    mut sel_r: Result[SqliteResultSet, DbError] = engine.execute(sel_compiled.sql, sel_compiled.params)
+    if sel_r.is_err:
+        t.fail("SELECT execute failed: " + sel_r.err.message)
+        t.summary()
+        return
+    mut sel_rs = sel_r.ok
+    mut got_row = false
+    mut stepping: Result[bool, DbError] = sel_rs.next()
+    while (not stepping.is_err) and stepping.ok:
+        got_row = true
+        t.assert_eq_str(sel_rs.get_str(1), "Ada", "selected row has the inserted name")
+        stepping = sel_rs.next()
+    t.assert_true(got_row, "SELECT returned the inserted row")
+    sel_rs.release()
+
+    # UPDATE
+    mut upd_names: Vec[str] = Vec[str].init(1)
+    upd_names.push("name")
+    mut upd_vals: Vec[str] = Vec[str].init(1)
+    upd_vals.push("Ada Lovelace")
+    mut upd_compiled = update(users).set(upd_names, upd_vals).where(eq(col("name"), lit("Ada"))).compile("sqlite")
+    t.assert_eq_str(upd_compiled.sql, "UPDATE users SET name = ? WHERE (name = ?)", "update compiles to expected SQL")
+    mut upd_r: Result[SqliteResultSet, DbError] = engine.execute(upd_compiled.sql, upd_compiled.params)
+    if upd_r.is_err:
+        t.fail("UPDATE execute failed: " + upd_r.err.message)
+        t.summary()
+        return
+    mut upd_rs = upd_r.ok
+    mut upd_step: Result[bool, DbError] = upd_rs.next()
+    if upd_step.is_err:
+        t.fail("UPDATE did not execute: " + upd_step.err.message)
+        t.summary()
+        return
+    t.assert_eq_int(upd_rs.rows_affected(), 1, "update affects 1 row")
+    upd_rs.release()
+
+    # Verify the update took effect
+    mut verify_compiled = select_from(users).cols(sel_cols).where(eq(col("name"), lit("Ada Lovelace"))).compile("sqlite")
+    mut verify_r: Result[SqliteResultSet, DbError] = engine.execute(verify_compiled.sql, verify_compiled.params)
+    if verify_r.is_err:
+        t.fail("verify SELECT failed: " + verify_r.err.message)
+        t.summary()
+        return
+    mut verify_rs = verify_r.ok
+    mut verify_got = false
+    mut vstep: Result[bool, DbError] = verify_rs.next()
+    while (not vstep.is_err) and vstep.ok:
+        verify_got = true
+        vstep = verify_rs.next()
+    t.assert_true(verify_got, "row now has the updated name")
+    verify_rs.release()
+
+    # DELETE
+    mut del_compiled = delete(users).where(eq(col("name"), lit("Ada Lovelace"))).compile("sqlite")
+    t.assert_eq_str(del_compiled.sql, "DELETE FROM users WHERE (name = ?)", "delete compiles to expected SQL")
+    mut del_r: Result[SqliteResultSet, DbError] = engine.execute(del_compiled.sql, del_compiled.params)
+    if del_r.is_err:
+        t.fail("DELETE execute failed: " + del_r.err.message)
+        t.summary()
+        return
+    mut del_rs = del_r.ok
+    mut del_step: Result[bool, DbError] = del_rs.next()
+    if del_step.is_err:
+        t.fail("DELETE did not execute: " + del_step.err.message)
+        t.summary()
+        return
+    t.assert_eq_int(del_rs.rows_affected(), 1, "delete affects 1 row")
+    del_rs.release()
+
+    # Verify the row is gone
+    mut final_compiled = select_from(users).compile("sqlite")
+    mut final_r: Result[SqliteResultSet, DbError] = engine.execute(final_compiled.sql, final_compiled.params)
+    if final_r.is_err:
+        t.fail("final SELECT failed: " + final_r.err.message)
+        t.summary()
+        return
+    mut final_rs = final_r.ok
+    mut final_got = false
+    mut fstep: Result[bool, DbError] = final_rs.next()
+    while (not fstep.is_err) and fstep.ok:
+        final_got = true
+        fstep = final_rs.next()
+    t.assert_true(not final_got, "table is empty after delete")
+    final_rs.release()
+
+    engine.release()
+    t.summary()

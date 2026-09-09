@@ -1,0 +1,97 @@
+# tauorm.expression — SqlExpr: a small WHERE-clause expression tree
+# (column refs, literals, comparisons, AND/OR/NOT), built via explicit
+# constructor functions (`eq(col("name"), lit("Ada"))`) rather than
+# operator overloading (`Column.name == "Ada"`). Phase 1 found several
+# real tauraroc bugs in less-exercised generic-class corners; operator
+# overloading on a custom class is another corner this project hasn't
+# proven yet, so it's deliberately deferred rather than assumed to work --
+# a nicer `col("name") == lit("Ada")` surface can be layered on top later
+# once verified, without changing how SqlExpr itself renders.
+#
+# render() is dialect-aware for exactly the one thing that needs to be:
+# placeholder syntax ($1, $2, ... vs ?). Params are collected into the
+# caller's `params` Vec via a mutating pass (Vec is a reference type, so
+# this is the normal single-pass compile-and-collect shape, not aliasing
+# risk) rather than returned separately, so a caller building a full
+# statement (select_stmt.tr etc.) can render several clauses in sequence
+# into one shared, correctly-ordered param list.
+
+from std.core.vec import Vec
+
+pub class SqlExpr:
+    pub kind:      str   # "col" | "lit" | "eq" | "ne" | "lt" | "gt" | "le" | "ge" | "like" | "and" | "or" | "not" | "is_null" | "is_not_null"
+    pub col_name:  str    # for "col"
+    pub lit_value: str     # for "lit" -- always text; the driver's own text protocol coerces it
+    pub left:      SqlExpr
+    pub right:     SqlExpr
+
+def _leaf(kind: str) -> SqlExpr:
+    mut e = SqlExpr()
+    e.kind = kind
+    return e
+
+def _binop(kind: str, l: SqlExpr, r: SqlExpr) -> SqlExpr:
+    mut e = SqlExpr()
+    e.kind = kind
+    e.left = l
+    e.right = r
+    return e
+
+def _unop(kind: str, l: SqlExpr) -> SqlExpr:
+    mut e = SqlExpr()
+    e.kind = kind
+    e.left = l
+    return e
+
+pub def col(name: str) -> SqlExpr:
+    mut e = _leaf("col")
+    e.col_name = name
+    return e
+
+pub def lit(value: str) -> SqlExpr:
+    mut e = _leaf("lit")
+    e.lit_value = value
+    return e
+
+pub def eq(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("eq", l, r)
+pub def ne(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("ne", l, r)
+pub def lt(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("lt", l, r)
+pub def gt(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("gt", l, r)
+pub def le(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("le", l, r)
+pub def ge(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("ge", l, r)
+pub def like(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("like", l, r)
+pub def and_(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("and", l, r)
+pub def or_(l: SqlExpr, r: SqlExpr) -> SqlExpr: return _binop("or", l, r)
+pub def not_(e: SqlExpr) -> SqlExpr: return _unop("not", e)
+pub def is_null(e: SqlExpr) -> SqlExpr: return _unop("is_null", e)
+pub def is_not_null(e: SqlExpr) -> SqlExpr: return _unop("is_not_null", e)
+
+extend SqlExpr:
+    # Renders this expression to SQL text for `dialect`, pushing any
+    # literal values into `params` in left-to-right tree-walk order (the
+    # SAME order the returned placeholders reference them in, whether
+    # that's Postgres's numbered $1/$2/... or SQLite's positional ?).
+    pub def render(self, dialect: str, params: Vec[str]) -> str:
+        if self.kind == "col": return self.col_name
+        if self.kind == "lit":
+            params.push(self.lit_value)
+            if dialect == "postgres": return "$" + params.len.to_str()
+            return "?"
+        if self.kind == "and":
+            return "(" + self.left.render(dialect, params) + " AND " + self.right.render(dialect, params) + ")"
+        if self.kind == "or":
+            return "(" + self.left.render(dialect, params) + " OR " + self.right.render(dialect, params) + ")"
+        if self.kind == "not":
+            return "(NOT " + self.left.render(dialect, params) + ")"
+        if self.kind == "is_null":
+            return "(" + self.left.render(dialect, params) + " IS NULL)"
+        if self.kind == "is_not_null":
+            return "(" + self.left.render(dialect, params) + " IS NOT NULL)"
+        mut op = "="
+        if self.kind == "ne": op = "!="
+        elif self.kind == "lt": op = "<"
+        elif self.kind == "gt": op = ">"
+        elif self.kind == "le": op = "<="
+        elif self.kind == "ge": op = ">="
+        elif self.kind == "like": op = "LIKE"
+        return "(" + self.left.render(dialect, params) + " " + op + " " + self.right.render(dialect, params) + ")"

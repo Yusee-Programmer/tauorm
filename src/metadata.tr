@@ -1,0 +1,76 @@
+# tauorm.metadata — MetaData: a registry of Tables, plus create_all/
+# drop_all to materialize/tear them down against a real Engine.
+#
+# create_all/drop_all are FREE generic functions, not generic METHODS on
+# MetaData, even though a method would read more naturally
+# (`md.create_all(engine, dialect)`) -- Phase 1 proved generic FREE
+# functions over `[C: DbConnection[RS], RS: DbResultSet]` work correctly
+# (dbapi_shared.tr), including taking a concrete Engine[C, RS] parameter
+# built from those same type params; a generic METHOD with two type
+# params taking its own class as connection-context wasn't specifically
+# exercised there. Sticking to the proven pattern here avoids reopening
+# that question for a schema-management helper where it doesn't matter.
+#
+# Every execute() result gets `.next()` called once before release(),
+# CREATE/DROP included -- see engine.tr/dbapi_shared.tr's header comments:
+# SQLite's execute() only prepares + binds; the statement doesn't actually
+# run until stepped at least once. Skipping this made a CREATE TABLE
+# silently no-op in an earlier phase.
+#
+# Both return `bool` (always `true`) rather than being declared with no
+# return type at all: a monomorphized generic FREE FUNCTION with an
+# implicit-void success type didn't correctly wrap its return into a
+# `Result` at an explicit-type-args call site (`invalid initializer`
+# assigning its call to a `Result`-typed variable) -- confirmed directly.
+# An explicit, even if trivial, return type sidesteps it.
+
+from dbapi import DbConnection, DbResultSet
+from db_error import DbError
+from engine import Engine
+from table import Table
+from std.core.vec import Vec
+
+pub class MetaData:
+    pub tables: Vec[Table]
+
+extend MetaData:
+    pub def init() -> MetaData:
+        mut m = MetaData()
+        m.tables = Vec[Table].init(4)
+        return m
+
+    pub def add(self, t: Table) -> MetaData:
+        self.tables.push(t)
+        return self
+
+pub def create_all[C: DbConnection[RS], RS: DbResultSet](md: MetaData, engine: Engine[C, RS], dialect: str) throws DbError -> bool:
+    mut no_params: Vec[str] = Vec[str].init(0)
+    mut i = 0
+    while i < md.tables.len:
+        mut t = md.tables.get(i)
+        mut r: Result[RS, DbError] = engine.execute(t.create_sql(dialect), no_params)
+        if r.is_err:
+            raise(DbError.init(r.err.code, r.err.message))
+        mut rs = r.ok
+        mut step: Result[bool, DbError] = rs.next()
+        if step.is_err:
+            raise(DbError.init(step.err.code, step.err.message))
+        rs.release()
+        i = i + 1
+    return true
+
+pub def drop_all[C: DbConnection[RS], RS: DbResultSet](md: MetaData, engine: Engine[C, RS]) throws DbError -> bool:
+    mut no_params: Vec[str] = Vec[str].init(0)
+    mut i = 0
+    while i < md.tables.len:
+        mut t = md.tables.get(i)
+        mut r: Result[RS, DbError] = engine.execute(t.drop_sql(), no_params)
+        if r.is_err:
+            raise(DbError.init(r.err.code, r.err.message))
+        mut rs = r.ok
+        mut step: Result[bool, DbError] = rs.next()
+        if step.is_err:
+            raise(DbError.init(step.err.code, step.err.message))
+        rs.release()
+        i = i + 1
+    return true

@@ -1,0 +1,59 @@
+# tauorm.column — Column: a named, typed table column with the handful of
+# constraints DDL generation needs (primary key, nullability, uniqueness).
+#
+# Builder-style chaining (`Column.init("id", Integer()).pk()`) mutates and
+# returns `self` rather than returning a new copy -- classes are heap
+# (reference) types in Tauraro, so this is the normal, zero-copy pattern
+# (matches how e.g. `mut b = Box[T].of(v)` factories work throughout this
+# codebase already), not aliasing risk the way it would be for a value type.
+
+from col_types import ColumnType
+
+pub class Column:
+    pub name:          str
+    pub col_type:      ColumnType
+    pub primary_key:   bool
+    pub nullable:      bool
+    pub unique:        bool
+
+extend Column:
+    pub def init(name: str, col_type: ColumnType) -> Column:
+        mut c = Column()
+        c.name = name
+        c.col_type = col_type
+        c.primary_key = false
+        c.nullable = true
+        c.unique = false
+        return c
+
+    pub def pk(self) -> Column:
+        self.primary_key = true
+        self.nullable = false
+        return self
+
+    pub def not_null(self) -> Column:
+        self.nullable = false
+        return self
+
+    pub def is_unique(self) -> Column:
+        self.unique = true
+        return self
+
+    # The DDL fragment for this column inside a CREATE TABLE's column list,
+    # e.g. "id SERIAL PRIMARY KEY" (Postgres) / "id INTEGER PRIMARY KEY"
+    # (SQLite -- an INTEGER PRIMARY KEY column there is itself an alias for
+    # the table's own rowid and behaves like autoincrement, so it doesn't
+    # need SQLite's separate, rarely-recommended AUTOINCREMENT keyword).
+    pub def ddl(self, dialect: str) -> str:
+        if self.primary_key and self.col_type.kind == "integer":
+            if dialect == "postgres":
+                return self.name + " SERIAL PRIMARY KEY"
+            return self.name + " INTEGER PRIMARY KEY"
+        mut sql = self.name + " " + self.col_type.ddl(dialect)
+        if self.primary_key:
+            sql = sql + " PRIMARY KEY"
+        elif not self.nullable:
+            sql = sql + " NOT NULL"
+        if self.unique:
+            sql = sql + " UNIQUE"
+        return sql

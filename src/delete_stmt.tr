@@ -1,0 +1,34 @@
+# tauorm.delete_stmt — Delete: delete(table).where(expr), compiling to
+# dialect-correct SQL + params.
+
+from table import Table
+from expression import SqlExpr
+from sql_compiler import SqlCompiled
+from std.core.vec import Vec
+
+pub class Delete:
+    pub table:      Table
+    pub where_expr: SqlExpr
+    pub has_where:  bool
+
+extend Delete:
+    pub def init(table: Table) -> Delete:
+        mut d = Delete()
+        d.table = table
+        d.has_where = false
+        return d
+
+    pub def where(self, expr: SqlExpr) -> Delete:
+        self.where_expr = expr
+        self.has_where = true
+        return self
+
+    pub def compile(self, dialect: str) -> SqlCompiled:
+        mut sql = "DELETE FROM " + self.table.name
+        mut params: Vec[str] = Vec[str].init(4)
+        if self.has_where:
+            sql = sql + " WHERE " + self.where_expr.render(dialect, params)
+        return SqlCompiled.init(sql, params)
+
+pub def delete(table: Table) -> Delete:
+    return Delete.init(table)

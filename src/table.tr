@@ -1,0 +1,42 @@
+# tauorm.table — Table: a named collection of Columns, with the DDL to
+# create/drop it. This is Core's schema representation; the ORM's
+# declarative layer (a later phase) will generate one of these from a
+# mapped class rather than requiring it be built by hand the way this
+# phase's tests do.
+
+from column import Column
+from std.core.vec import Vec
+
+pub class Table:
+    pub name:    str
+    pub columns: Vec[Column]
+
+extend Table:
+    pub def init(name: str, columns: Vec[Column]) -> Table:
+        mut t = Table()
+        t.name = name
+        t.columns = columns
+        return t
+
+    pub def col(self, name: str) throws str -> Column:
+        mut i = 0
+        while i < self.columns.len:
+            mut c = self.columns.get(i)
+            if c.name == name: return c
+            i = i + 1
+        raise("Table '" + self.name + "' has no column '" + name + "'")
+
+    pub def create_sql(self, dialect: str) -> str:
+        mut sql = "CREATE TABLE " + self.name + " (\n"
+        mut i = 0
+        while i < self.columns.len:
+            mut c = self.columns.get(i)
+            sql = sql + "    " + c.ddl(dialect)
+            if i < self.columns.len - 1: sql = sql + ","
+            sql = sql + "\n"
+            i = i + 1
+        sql = sql + ")"
+        return sql
+
+    pub def drop_sql(self) -> str:
+        return "DROP TABLE IF EXISTS " + self.name

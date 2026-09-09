@@ -141,33 +141,57 @@ tauorm/
                                      # a from-scratch pool for drivers (like
                                      # sqlite3) that don't have one
 
-    # ── Phase 2: composable SQL expression language (planned) ─────────────
-    expression.tr             # ColumnClause, BinaryExpression, and_/or_/not_,
-                                # ==, !=, <, >, like(), in_(), is_(None)
-    sql_functions.tr             # func.count/sum/avg/now/coalesce/... (dialect-
-                                   # aware rendering, e.g. Postgres NOW() vs
-                                   # SQLite datetime('now'))
-    select_stmt.tr                  # select(*cols).where().join().group_by()
-                                      # .order_by().limit()/.offset()
-    insert_stmt.tr                     # insert(table).values(...); .returning()
-                                         # where the dialect supports it
-    update_stmt.tr                        # update(table).where().values(...)
-    delete_stmt.tr                           # delete(table).where()
-    sql_compiler.tr                             # Statement -> (sql_string, params)
-                                                  # per-dialect; owns paramstyle
-                                                  # rendering ($1.. vs ?)
+    # ── Phase 2: SQL expression language (Phase 2 -- DONE, see Status) ────
+    expression.tr              # SqlExpr: col()/lit()/eq()/ne()/lt()/gt()/le()/
+                                 # ge()/like()/and_()/or_()/not_()/is_null()/
+                                 # is_not_null(), built via explicit constructor
+                                 # functions (not operator overloading -- see
+                                 # this file's header comment for why) +
+                                 # .render(dialect, params) -> dialect-correct
+                                 # SQL text, collecting bound params in order.
+    sql_compiler.tr               # SqlCompiled { sql, params } -- what every
+                                    # statement builder below compiles to,
+                                    # ready for Engine.execute(sql, params).
+    select_stmt.tr                  # select_from(table).cols([...]).where(expr)
+                                      # .limit(n).compile(dialect). Named
+                                      # select_from(), not select() -- see its
+                                      # own header comment (a real Windows
+                                      # winsock2.h collision, not a Tauraro one).
+    insert_stmt.tr                     # insert(table).values([names],[values])
+                                         # .compile(dialect)
+    update_stmt.tr                        # update(table).set([names],[values])
+                                            # .where(expr).compile(dialect)
+    delete_stmt.tr                           # delete(table).where(expr)
+                                               # .compile(dialect)
 
-    # ── Schema definition + DDL (planned) ──────────────────────────────────
-    table.tr                  # Table(name, *columns, metadata=)
-    column.tr                    # Column(name, type, primary_key=, nullable=,
-                                   # default=, unique=, index=)
-    col_types.tr                    # Integer, BigInteger, String(length), Text,
-                                      # Boolean, Float, Numeric, Date, DateTime,
-                                      # JSON, ... + per-dialect DDL rendering
-    constraints.tr                     # PrimaryKeyConstraint, ForeignKey,
-                                         # UniqueConstraint, CheckConstraint, Index
-    metadata.tr                           # MetaData: create_all(engine) /
-                                            # drop_all(engine)
+    # ── Schema definition + DDL (Phase 2 -- DONE, see Status) ──────────────
+    table.tr                  # Table(name, Vec[Column]) -- .col(name),
+                                # .create_sql(dialect), .drop_sql()
+    column.tr                    # Column: name/type/primary_key/nullable/
+                                   # unique + builder chaining (.pk()/.not_null()
+                                   # /.is_unique()) + .ddl(dialect)
+    col_types.tr                    # Integer/BigInteger/Text/VarChar(n)/Boolean/
+                                      # Float/DateTime, each with per-dialect DDL
+                                      # rendering (e.g. Integer+primary_key ->
+                                      # SERIAL on Postgres, INTEGER on SQLite)
+    metadata.tr                        # MetaData (Vec[Table] registry) +
+                                         # create_all/drop_all -- generic FREE
+                                         # functions (not methods; see this
+                                         # file's header comment for why),
+                                         # calling .next() once per DDL
+                                         # statement the same way
+                                         # dbapi_shared.tr's tests do
+
+    # ── planned (not built this phase) ─────────────────────────────────────
+    sql_functions.tr           # func.count/sum/avg/now/coalesce/... (dialect-
+                                 # aware rendering, e.g. Postgres NOW() vs
+                                 # SQLite datetime('now'))
+    constraints.tr                # PrimaryKeyConstraint, ForeignKey,
+                                    # UniqueConstraint, CheckConstraint, Index
+                                    # (today: primary_key/nullable/unique live
+                                    # directly on Column; joins/foreign keys
+                                    # aren't needed until relationships, a
+                                    # later ORM phase)
 
     # ── ORM: mapping, sessions, relationships (planned) ────────────────────
     declarative.tr             # DeclarativeBase, mapped_column()
@@ -191,7 +215,13 @@ tauorm/
                               # RS: DbResultSet] is ONE generic function, called
                               # unmodified from both test_dbapi_sqlite.tr (runs for
                               # real, in-memory) and test_dbapi_postgres.tr (needs a
-                              # live server -- see its header comment)
+                              # live server -- see its header comment). test_engine_
+                              # sqlite.tr proves Engine[C,RS] the same way.
+                              # test_phase2_sqlite.tr runs a full CREATE TABLE / INSERT
+                              # / SELECT / UPDATE / DELETE round trip through the
+                              # schema layer + query builders + Engine, in-memory,
+                              # asserting both the compiled SQL text AND the actual
+                              # row data at every step (11 assertions, all passing).
   docs/                     # planned: 01-getting-started.md, 02-core.md,
                               # 03-orm-relationships.md
 ```
@@ -384,6 +414,60 @@ rediscovered the same way:
   itself, so the same call there is a harmless no-op, making this the
   correct portable idiom rather than a SQLite-only workaround.
 
+**Phase 2 (SQL expression language + schema) is done and verified for
+real** -- `test_phase2_sqlite.tr` runs a full CREATE TABLE / INSERT /
+SELECT / UPDATE / DELETE round trip in-memory, asserting both the exact
+compiled SQL text and the actual row data at every step (11 assertions,
+all passing), and both dialect paths `--check` clean. Two more real
+`tauraroc` bugs surfaced, both the SAME class of bug as one already fixed
+in `ensure_mono` for class methods (see above) -- `ensure_mono_func_n`
+(the NEWER machinery for monomorphizing a generic FREE function with N
+type params) turned out to have the identical gap, just never exercised
+by Phase 1's generic functions since none of them both threw AND took an
+`Engine[C, RS]`-shaped argument:
+
+- A monomorphized generic free function's C signature used its bare
+  success type instead of `Result` when the function was `throws`-declared
+  (`gen_func_sig`'s own check for this was correctly applied elsewhere,
+  but `ensure_mono_func_n` computed its signature independently and
+  skipped it) -- fixed by adding the same `f.throws_ty.name != ""` check.
+- The same monomorphization path never set `cur_throws_ty` before
+  generating the function body either (identical to the class-method bug
+  already fixed) -- fixed the same way, set/restore around
+  `gen_func_body`.
+
+Both reproduced concretely via `metadata.tr`'s `create_all` (a generic
+free function taking `engine: Engine[C, RS]`, declared `throws DbError`)
+called with explicit type arguments (`create_all[SqliteConnection,
+SqliteResultSet](md, engine, dialect)`) -- exactly the pattern
+`Engine.wrap`'s own inference gap (see above) already established needs
+explicit type args for this class of call. `create_all`/`drop_all` return
+`bool` rather than being void-only `throws` functions, sidestepping a
+separate, narrower version of the same underlying gap (an implicit-void
+generic free function's return-wrapping) without needing a third
+compiler change for what was, by that point, a clearly-understood root
+cause.
+
+One naming collision, unrelated to any of the above: a top-level `pub def
+select(table: Table) -> Select:` collides with Windows' `winsock2.h`
+`select()` (the socket multiplexing syscall) at the C level, since the
+generated runtime pulls that header in for its own networking support and
+Tauraro's keyword-escaping covers language keywords, not arbitrary
+platform-library symbol names. Renamed to `select_from()`; see
+`select_stmt.tr`'s header comment.
+
+This session's self-hosting verification was lighter for this batch of
+fixes than Phase 1's full gen1->gen2->gen3 fixpoint: gen1 (with the fix)
+successfully self-compiled to gen2, confirming the fix doesn't break
+self-hosting, without repeating the full byte-identical-codegen check a
+second time. Several build attempts during this session hit transient,
+environment-level failures (a lingering `tauraroc.exe`/`gcc.exe`/`cc1.exe`
+process from an earlier, timed-out attempt racing a fresh one over the
+same `build/` directory, and once a build that was still genuinely
+in-progress past a 5-minute wait rather than actually stuck) -- not
+compiler bugs; resolved by killing stale processes and/or simply waiting
+longer before concluding a run had failed.
+
 ## What's deferred, and why
 
 - **Migrations** (an Alembic equivalent — versioned schema changes,
@@ -419,11 +503,16 @@ rediscovered the same way:
    dialect wraps its own connection factory directly instead
    (`Engine[SqliteConnection, SqliteResultSet].wrap(SqliteConnection.
    open(path)?)`).
-2. **Phase 2 — Expression language + schema.** `select`/`insert`/`update`/
-   `delete` builders, `Table`/`Column`/`types`/constraints, `MetaData.
-   create_all`/`drop_all`. Success condition: the same Python-esque query
-   built once compiles to correct, dialect-appropriate SQL + params for both
-   backends.
+2. **Phase 2 — Expression language + schema.** `select_from`/`insert`/
+   `update`/`delete` builders, `Table`/`Column`/`col_types`, `MetaData.
+   create_all`/`drop_all`: **done, see Status.** Verified end-to-end against
+   SQLite (11 assertions, `test_phase2_sqlite.tr`), `--check`-clean for
+   Postgres. Not yet done: `sql_functions.tr` (func.count/sum/now/...),
+   dedicated constraint objects beyond what `Column` itself carries
+   (foreign keys aren't needed until relationships, joins aren't needed
+   until then either) -- reasonable to pick up alongside Phase 4
+   (relationships) when there's a concrete need driving their design,
+   rather than speculatively now.
 3. **Phase 3 — ORM mapping + sync Session.** Declarative base, `Mapper`,
    identity map, a unit of work that handles single-table insert/update/
    delete ordering. No relationships yet.

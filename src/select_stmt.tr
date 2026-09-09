@@ -1,0 +1,67 @@
+# tauorm.select_stmt — Select: select_from(table).cols([...]).where(expr)
+# .limit(n), compiling to dialect-correct SQL + params.
+#
+# Named select_from(), not the more SQLAlchemy-idiomatic select(): the
+# generated C runtime pulls in Windows' winsock2.h for its own networking
+# support, which already declares a `select(int, fd_set*, ...)` (the
+# socket multiplexing syscall) -- Tauraro's C-keyword escaping covers
+# actual language keywords (see dbapi.tr's release()/close() note from
+# Phase 1) but not arbitrary platform-library symbol names, so a bare
+# top-level `pub def select(...)` collides at the C level with a
+# conflicting-signature redeclaration error. Confirmed directly.
+
+from table import Table
+from expression import SqlExpr
+from sql_compiler import SqlCompiled
+from std.core.vec import Vec
+
+pub class Select:
+    pub table:      Table
+    pub columns:    Vec[str]   # empty = SELECT *
+    pub where_expr: SqlExpr
+    pub has_where:  bool
+    pub limit_n:    int
+    pub has_limit:  bool
+
+extend Select:
+    pub def init(table: Table) -> Select:
+        mut s = Select()
+        s.table = table
+        s.columns = Vec[str].init(4)
+        s.has_where = false
+        s.has_limit = false
+        return s
+
+    pub def cols(self, columns: Vec[str]) -> Select:
+        self.columns = columns
+        return self
+
+    pub def where(self, expr: SqlExpr) -> Select:
+        self.where_expr = expr
+        self.has_where = true
+        return self
+
+    pub def limit(self, n: int) -> Select:
+        self.limit_n = n
+        self.has_limit = true
+        return self
+
+    pub def compile(self, dialect: str) -> SqlCompiled:
+        mut col_list = "*"
+        if self.columns.len > 0:
+            col_list = ""
+            mut i = 0
+            while i < self.columns.len:
+                if i > 0: col_list = col_list + ", "
+                col_list = col_list + self.columns.get(i)
+                i = i + 1
+        mut sql = "SELECT " + col_list + " FROM " + self.table.name
+        mut params: Vec[str] = Vec[str].init(4)
+        if self.has_where:
+            sql = sql + " WHERE " + self.where_expr.render(dialect, params)
+        if self.has_limit:
+            sql = sql + " LIMIT " + self.limit_n.to_str()
+        return SqlCompiled.init(sql, params)
+
+pub def select_from(table: Table) -> Select:
+    return Select.init(table)

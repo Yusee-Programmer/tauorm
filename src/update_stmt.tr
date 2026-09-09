@@ -1,0 +1,54 @@
+# tauorm.update_stmt — Update: update(table).set([names], [values]).where(expr),
+# compiling to dialect-correct SQL + params. SET values are placed into
+# `params` before any WHERE-clause literals, matching the left-to-right
+# order they appear in the compiled SQL text.
+
+from table import Table
+from expression import SqlExpr
+from sql_compiler import SqlCompiled
+from std.core.vec import Vec
+
+pub class Update:
+    pub table:      Table
+    pub set_names:  Vec[str]
+    pub set_values: Vec[str]
+    pub where_expr: SqlExpr
+    pub has_where:  bool
+
+extend Update:
+    pub def init(table: Table) -> Update:
+        mut u = Update()
+        u.table = table
+        u.set_names = Vec[str].init(4)
+        u.set_values = Vec[str].init(4)
+        u.has_where = false
+        return u
+
+    pub def set(self, names: Vec[str], values: Vec[str]) -> Update:
+        self.set_names = names
+        self.set_values = values
+        return self
+
+    pub def where(self, expr: SqlExpr) -> Update:
+        self.where_expr = expr
+        self.has_where = true
+        return self
+
+    pub def compile(self, dialect: str) -> SqlCompiled:
+        mut set_clause = ""
+        mut params: Vec[str] = Vec[str].init(self.set_values.len + 2)
+        mut i = 0
+        while i < self.set_names.len:
+            if i > 0: set_clause = set_clause + ", "
+            params.push(self.set_values.get(i))
+            mut ph = "?"
+            if dialect == "postgres": ph = "$" + params.len.to_str()
+            set_clause = set_clause + self.set_names.get(i) + " = " + ph
+            i = i + 1
+        mut sql = "UPDATE " + self.table.name + " SET " + set_clause
+        if self.has_where:
+            sql = sql + " WHERE " + self.where_expr.render(dialect, params)
+        return SqlCompiled.init(sql, params)
+
+pub def update(table: Table) -> Update:
+    return Update.init(table)
