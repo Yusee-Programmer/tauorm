@@ -1,0 +1,82 @@
+# tests.dbapi_shared — backend-agnostic assertions run against EITHER
+# dialect adapter through one generic function. Called from
+# test_dbapi_postgres.tr / test_dbapi_sqlite.tr -- Tauraro has no
+# conditional compilation to pick a dialect import by feature flag inside
+# one file, so each backend still needs its own thin entry file that
+# imports the ONE dialect adapter it needs, but the actual test logic now
+# lives here exactly once.
+#
+# This is the real proof of PROPOSAL.md's Phase 1 success condition: the
+# exact same generic function, unmodified, running a CREATE/INSERT/SELECT
+# round trip through both dialects' DbConnection/DbResultSet. An earlier
+# pass had to duplicate this logic per dialect after a tauraroc bug
+# mis-codegened method calls inside a monomorphized generic body -- now
+# fixed upstream (see PROPOSAL.md's Status section), so this is restored.
+#
+# Every execute() result -- CREATE TABLE and INSERT included, not just
+# SELECT -- gets `.next()` called on it once before use. This isn't
+# defensive filler: SQLite's execute() only prepares + binds (see
+# sqlite_dialect.tr), so the statement does not actually RUN until
+# stepped at least once -- caught this the hard way as a real bug (CREATE
+# TABLE "succeeded" with no error, then the very next INSERT failed with
+# "no such table: t_users", because CREATE TABLE had never actually been
+# stepped). Postgres already executes inside execute() itself, so the same
+# `.next()` call there is a harmless no-op that just reports "no rows" --
+# calling it unconditionally for both dialects is the portable idiom this
+# interface actually requires, not a Postgres-only shortcut.
+#
+# Deliberately no bound parameters: placeholder syntax itself differs per
+# dialect ($1 vs ?) -- rendering that consistently is the SQL expression
+# language's job (Phase 2's compiler.tr), not something the raw
+# execute(sql, params) primitive abstracts over yet.
+
+from dbapi import DbConnection, DbResultSet
+from db_error import DbError
+from std.core.vec import Vec
+from std.test import TestRunner
+
+pub def run_shared_tests[C: DbConnection[RS], RS: DbResultSet](t: TestRunner, conn: C):
+    mut no_params: Vec[str] = Vec[str].init(0)
+
+    mut create_r: Result[RS, DbError] = conn.execute("CREATE TABLE t_users(id INTEGER PRIMARY KEY, name TEXT)", no_params)
+    if create_r.is_err:
+        t.fail("CREATE TABLE failed: " + create_r.err.message)
+        return
+    mut create_rs = create_r.ok
+    mut create_step: Result[bool, DbError] = create_rs.next()
+    if create_step.is_err:
+        t.fail("CREATE TABLE did not execute: " + create_step.err.message)
+        return
+    create_rs.release()
+
+    mut ins_r: Result[RS, DbError] = conn.execute("INSERT INTO t_users(name) VALUES ('Ada')", no_params)
+    if ins_r.is_err:
+        t.fail("INSERT failed: " + ins_r.err.message)
+        return
+    mut ins_rs = ins_r.ok
+    mut ins_step: Result[bool, DbError] = ins_rs.next()
+    if ins_step.is_err:
+        t.fail("INSERT did not execute: " + ins_step.err.message)
+        return
+    t.assert_eq_int(ins_rs.rows_affected(), 1, "insert affects 1 row")
+    ins_rs.release()
+
+    mut sel_r: Result[RS, DbError] = conn.execute("SELECT id, name FROM t_users", no_params)
+    if sel_r.is_err:
+        t.fail("SELECT failed: " + sel_r.err.message)
+        return
+    mut sel_rs = sel_r.ok
+    mut got_row = false
+    mut stepping: Result[bool, DbError] = sel_rs.next()
+    while (not stepping.is_err) and stepping.ok:
+        got_row = true
+        t.assert_eq_str(sel_rs.get_str(1), "Ada", "selected row has the inserted name")
+        t.assert_true(not sel_rs.is_null(0), "id column is not null")
+        stepping = sel_rs.next()
+    if stepping.is_err:
+        t.fail("SELECT iteration failed: " + stepping.err.message)
+        return
+    t.assert_true(got_row, "SELECT returned at least one row")
+    sel_rs.release()
+
+    conn.release()

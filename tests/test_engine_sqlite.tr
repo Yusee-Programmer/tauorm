@@ -1,0 +1,72 @@
+# tests.test_engine_sqlite — proves Engine[C, RS] works against a real
+# dialect the same way calling SqliteConnection directly does: it's a thin
+# delegate, not a reimplementation. Reuses dbapi_shared.tr's SAME generic
+# test logic by wrapping the connection in an Engine first -- Engine
+# itself satisfies nothing special, so run_shared_tests[C: DbConnection[RS],
+# RS: DbResultSet] can't take an Engine directly (Engine doesn't implement
+# DbConnection, it WRAPS one); this test instead calls Engine's own
+# execute/begin/commit/rollback/release directly to prove those delegate
+# correctly.
+
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from engine import Engine
+from db_error import DbError
+from std.core.vec import Vec
+from std.test import TestRunner
+
+def main():
+    mut t = TestRunner.init("engine (sqlite dialect)")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        t.fail("could not open SQLite connection: " + open_r.err.message)
+        t.summary()
+        return
+
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+    mut no_params: Vec[str] = Vec[str].init(0)
+
+    mut create_r: Result[SqliteResultSet, DbError] = engine.execute("CREATE TABLE t_users(id INTEGER PRIMARY KEY, name TEXT)", no_params)
+    if create_r.is_err:
+        t.fail("CREATE TABLE failed: " + create_r.err.message)
+        t.summary()
+        return
+    mut create_rs = create_r.ok
+    mut create_step: Result[bool, DbError] = create_rs.next()
+    if create_step.is_err:
+        t.fail("CREATE TABLE did not execute: " + create_step.err.message)
+        t.summary()
+        return
+    create_rs.release()
+
+    mut ins_r: Result[SqliteResultSet, DbError] = engine.execute("INSERT INTO t_users(name) VALUES ('Ada')", no_params)
+    if ins_r.is_err:
+        t.fail("INSERT failed: " + ins_r.err.message)
+        t.summary()
+        return
+    mut ins_rs = ins_r.ok
+    mut ins_step: Result[bool, DbError] = ins_rs.next()
+    if ins_step.is_err:
+        t.fail("INSERT did not execute: " + ins_step.err.message)
+        t.summary()
+        return
+    t.assert_eq_int(ins_rs.rows_affected(), 1, "insert affects 1 row via Engine")
+    ins_rs.release()
+
+    mut sel_r: Result[SqliteResultSet, DbError] = engine.execute("SELECT id, name FROM t_users", no_params)
+    if sel_r.is_err:
+        t.fail("SELECT failed: " + sel_r.err.message)
+        t.summary()
+        return
+    mut sel_rs = sel_r.ok
+    mut got_row = false
+    mut stepping: Result[bool, DbError] = sel_rs.next()
+    while (not stepping.is_err) and stepping.ok:
+        got_row = true
+        t.assert_eq_str(sel_rs.get_str(1), "Ada", "selected row has the inserted name via Engine")
+        stepping = sel_rs.next()
+    t.assert_true(got_row, "SELECT via Engine returned at least one row")
+    sel_rs.release()
+
+    engine.release()
+    t.summary()

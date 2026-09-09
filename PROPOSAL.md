@@ -35,12 +35,13 @@ language, schema layer, and ORM above it are written once, against that
 interface, the same way SQLAlchemy's own `Dialect`/`DBAPI` boundary lets one
 `Query` implementation run against a dozen real databases.
 
-Phase 1 (below) landed on an even more literal version of "normalized behind
-one interface" than originally planned here: both dialects' `execute()`
-returns the exact same concrete `QueryResultSet` class (not their own
-result-set type each separately satisfying a generic interface) — see
-"Status" for why, and for three real `tauraroc` limitations found building
-this that shaped the decision.
+Phase 1 (below) is built exactly as described here: each dialect's
+`execute()` returns its OWN result-set type (`PostgresResultSet`/
+`SqliteResultSet`), separately satisfying the shared `DbResultSet`
+interface, generic over `DbConnection[RS]`. Getting there took an
+intermediate detour through a single shared, eagerly-materialized result
+class after hitting real `tauraroc` generics/interfaces bugs — see
+"Status" for that history and the bugs involved, all since fixed upstream.
 
 ## Backends are optional `taupkg` dependencies, not hard dependencies
 
@@ -92,10 +93,9 @@ proposal sketched. Two concrete reasons, not just convention-matching:
 - It also avoids a real naming trap: `taupostgres`/`tausqlite3` already
   claim short top-level names like `connection.tr`, `result.tr`, `errors.tr`
   on `TAURARO_PATH` once tauorm depends on them. tauorm's own modules avoid
-  those exact names (`db_error.tr` not `errors.tr`, `query_result.tr` not
-  `result.tr` — the latter doubly so since `Result` is also Tauraro's
-  built-in `Result[T,E]` name, the same collision taupostgres's own
-  PROPOSAL.md flagged for `PgResult`).
+  those exact names (`db_error.tr` not `errors.tr` — doubly motivated since
+  `Result` is also Tauraro's built-in `Result[T,E]` name, the same
+  collision taupostgres's own PROPOSAL.md flagged for `PgResult`).
 
 ```
 tauorm/
@@ -108,24 +108,33 @@ tauorm/
                               # directly, whichever their build has installed.
 
     # ── Core: dialect boundary (Phase 1 -- DONE, see Status) ──────────────
-    dbapi.tr                  # DbConnection interface -- execute/begin/commit/
-                                # rollback/close. Non-generic (see Status for why).
+    dbapi.tr                  # DbResultSet interface (column_count/column_name/
+                                # next/get_*/is_null/rows_affected/release) +
+                                # generic DbConnection[RS] (execute/begin/commit/
+                                # rollback/release). RS is unbounded on the
+                                # INTERFACE declaration itself (see Status for
+                                # why) -- the RS: DbResultSet constraint is
+                                # enforced at every generic use site instead.
     db_error.tr                 # DbError { code, message } -- the one error type
                                   # every dialect adapter raises, translated from
                                   # whatever the underlying driver actually threw.
-    query_result.tr               # QueryResultSet -- ONE concrete, dialect-agnostic
-                                    # materialized result (column names, rows, null
-                                    # flags, affected-row count) + a step-cursor API
-                                    # (next()/get_*()/is_null()) on top of it.
-    postgres_dialect.tr             # PostgresConnection: wraps postgres.Connection,
-                                      # materializes PgResult into QueryResultSet.
-    sqlite_dialect.tr                 # SqliteConnection: wraps sqlite3.Connection,
-                                        # steps its Statement to completion into
-                                        # QueryResultSet.
+    postgres_dialect.tr            # PostgresResultSet (implements DbResultSet,
+                                     # walks an already-materialized PgResult) +
+                                     # PostgresConnection (implements
+                                     # DbConnection[PostgresResultSet]).
+    sqlite_dialect.tr                # SqliteResultSet (implements DbResultSet,
+                                       # a thin wrapper over Statement's own
+                                       # step-cursor) + SqliteConnection
+                                       # (implements DbConnection[SqliteResultSet]).
+    engine.tr                          # Engine[C: DbConnection[RS], RS: DbResultSet]
+                                         # -- a thin wrapper around one open
+                                         # connection (execute/begin/commit/
+                                         # rollback/release). No URL-based
+                                         # create_engine(url) dispatch (see its
+                                         # own header comment for why) and no
+                                         # pooling yet (see "planned" below).
 
     # ── planned, not yet built ─────────────────────────────────────────────
-    engine.tr                # create_engine(url) -- picks a dialect by URL
-                               # scheme, owns a connection pool
     async_engine.tr             # create_async_engine(url) + AsyncConnection
                                   # -- see "Sync and async" below
     pool.tr                        # thin wrapper unifying postgres.Pool with
@@ -178,12 +187,11 @@ tauorm/
 
   example/app/              # planned: a CRUD + relationships walkthrough,
                               # runnable against either backend
-  tests/                    # test_dbapi_sqlite.tr (runs for real, in-memory),
-                              # test_dbapi_postgres.tr (needs a live server --
-                              # see its header comment); NOT a single shared
-                              # generic test function over both dialects --
-                              # see Status for the compiler bug that forced
-                              # duplicating the ~15 lines of test logic instead
+  tests/                    # dbapi_shared.tr's run_shared_tests[C: DbConnection[RS],
+                              # RS: DbResultSet] is ONE generic function, called
+                              # unmodified from both test_dbapi_sqlite.tr (runs for
+                              # real, in-memory) and test_dbapi_postgres.tr (needs a
+                              # live server -- see its header comment)
   docs/                     # planned: 01-getting-started.md, 02-core.md,
                               # 03-orm-relationships.md
 ```
@@ -216,53 +224,119 @@ underlying async story improves.
 ## Status
 
 **Phase 1 (Core dialect boundary) is done and verified for real, not just
-compiled.** `dbapi.tr`'s `DbConnection` interface, `db_error.tr`'s `DbError`,
-`query_result.tr`'s `QueryResultSet`, and both `postgres_dialect.tr`/
-`sqlite_dialect.tr` adapters are written and check clean against their real
-drivers. `tests/test_dbapi_sqlite.tr` actually runs (in-memory, no server)
-and passes all 4 assertions: CREATE TABLE, INSERT (`rows_affected() == 1`),
-SELECT round-tripping the inserted value back out, and a not-null check.
-`tests/test_dbapi_postgres.tr` is written and `--check`-clean but untried
-against a live server (none available while building this). Both `taupkg
-install --features sqlite` and `taupkg build --features sqlite` succeed
-end-to-end through the real package manager, not just via a manually-set
-`TAURARO_PATH`.
+compiled, with the originally-planned generic design intact.** `dbapi.tr`'s
+`DbResultSet` interface and generic `DbConnection[RS]`, `db_error.tr`'s
+`DbError`, and both `postgres_dialect.tr`/`sqlite_dialect.tr` adapters
+(each with its OWN streaming result-set class -- `PostgresResultSet`/
+`SqliteResultSet` -- satisfying `DbResultSet`, not a single shared
+materialized class) are written and check clean against their real
+drivers. `tests/dbapi_shared.tr`'s `run_shared_tests[C: DbConnection[RS],
+RS: DbResultSet]` is ONE generic function, run unmodified against both
+dialects from their own thin entry files. `tests/test_dbapi_sqlite.tr`
+actually runs (in-memory, no server) and passes all 4 assertions: CREATE
+TABLE, INSERT (`rows_affected() == 1`), SELECT round-tripping the inserted
+value back out, and a not-null check. `tests/test_dbapi_postgres.tr` is
+written and `--check`-clean but untried against a live server (none
+available while building this). Both `taupkg install --features sqlite`
+and `taupkg build --features sqlite` succeed end-to-end through the real
+package manager, not just via a manually-set `TAURARO_PATH`.
 
-Three real `tauraroc` limitations surfaced while building this, all worth
-fixing upstream but none blocking Phase 1 once designed around:
+This took two passes. The first hit three real `tauraroc` limitations
+(a segfault on mutually-referential generic bounds, missing dynamic-
+dispatch boxing for bare interface return types, and mis-codegen for
+method calls inside a monomorphized generic body calling through an
+interface-bound receiver) and fell back to a single shared, eagerly-
+materialized `QueryResultSet` class to work around all three at once.
+Those three (plus two more found integrating the fix: multi-type-arg
+generic call parsing/inference, and a non-generic class implementing a
+generic interface with concrete type arguments silently discarding them)
+were then fixed upstream in `tauraroc` itself, so the second pass restored
+the original per-dialect-streaming-class design and deleted the
+materialization workaround entirely.
 
-1. **Segfault on mutually-referential generic bounds.** A generic function
-   declared `[C: DbConnection[RS], RS: DbResultSet]` (one bound's type
-   argument is another type parameter of the same function) crashes the
-   compiler outright. Reproduced with a ~15-line repro unrelated to any DB
-   code. This is *why* `DbConnection` ended up non-generic and both
-   dialects converge on the single concrete `QueryResultSet` (see below)
-   instead of each having their own result-set type satisfying a shared
-   generic interface, the originally-planned design.
-2. **No dynamic-dispatch boxing for bare interface return types.** A
-   function declared `-> SomeInterface` (not a generic bound, the interface
-   name used directly as a concrete return type) type-checks under
-   `--check`, but real codegen fails: `incompatible types when returning
-   type 'X *' but 'Y_obj' was expected`. So there's no cheap way to return
-   "some type satisfying DbResultSet" without generics either.
-3. **Mis-codegen for method calls on a concrete return type inside a
-   monomorphized generic function body.** Even with a single, non-crashing
-   generic bound (`[C: DbConnection]`), a generic function's body calling
-   methods on `QueryResultSet` (a concrete type returned by the
-   interface-bound `execute()`) emits bare, unqualified C calls (e.g.
-   `next(sel_rs)`) instead of `QueryResultSet_next(sel_rs)`. This is why
-   `tests/dbapi_shared.tr` (one shared generic test function called from
-   both `test_dbapi_postgres.tr`/`test_dbapi_sqlite.tr`) was abandoned in
-   favor of duplicating the ~15 lines of test logic per dialect.
+Two smaller things surfaced integrating the fixed compiler, both worked
+around rather than blocking on another fix cycle:
 
-Combined, these three pushed Phase 1 toward less genericity than planned:
-one shared concrete `QueryResultSet` class instead of a generic
-`DbResultSet` interface each dialect implements separately. This is a
-reasonable trade for now (see `query_result.tr`'s header comment for the
-one real cost: SQLite's step-cursor gets walked to completion inside
-`execute()` rather than streamed, matching how Postgres's own `PgResult`
-already works) and can be revisited once/if the compiler's generic-bound
-handling matures.
+- **A bound on a generic INTERFACE's own type parameter** (`interface
+  DbConnection[RS: DbResultSet]:`, as opposed to a bound on a generic
+  *function's* parameter, which works fine) **hangs `tauraroc --check`
+  indefinitely.** Reproduced with a 4-line, DB-unrelated repro. Worked
+  around by declaring `DbConnection[RS]` unbounded in `dbapi.tr` and
+  keeping the `RS: DbResultSet` constraint only at every generic function/
+  class use site (`run_shared_tests[C: DbConnection[RS], RS:
+  DbResultSet]`), which is unaffected and works correctly.
+- **The interface-vtable-wrapper codegen emits a method's plain name
+  instead of its C-keyword-escaped name.** `close()` legitimately compiles
+  to `_tr_fn_close` everywhere else in the generated C (it collides with
+  POSIX `close(fd)`), but the generated vtable initializer referenced the
+  plain, non-existent `SqliteConnection_close`, an undefined-reference link
+  failure. Sidestepped by naming the interface method `release()` instead
+  of `close()` throughout `dbapi.tr` and both dialect adapters -- not a
+  general fix (any interface method colliding with a C keyword/stdlib name
+  would hit the same issue), but sufficient here.
+
+**`engine.tr` (`Engine[C, RS]`, a thin generic wrapper around a single
+DbConnection) is also done**, closing out the rest of Phase 1's original
+scope (see "Suggested sequencing" below for what's still explicitly not
+in it -- pooling). Building it surfaced 4 MORE real `tauraroc` bugs, all
+specific to generic CLASSES with two cross-referencing type parameters
+(`class Engine[C: DbConnection[RS], RS: DbResultSet]:`) -- generic
+FUNCTIONS with the identical bounds, which is all `dbapi_shared.tr` uses,
+were unaffected throughout. Unlike the two bugs just above, these four
+were fixed at the root in `tauraroc`'s own source (`~/tauraro`), not
+worked around:
+
+1. A CLASS's own bound-satisfaction check for a second, cross-referenced
+   type parameter only resolved correctly when that parameter's name was
+   a single character -- `_is_type_param_in_scope` checked the enclosing
+   FUNCTION's generics but never the enclosing CLASS's, falling back to a
+   `strlen == 1` heuristic that happened to catch single-letter names by
+   coincidence. Fixed by also checking `self.classes.get(current_class_name)
+   .generics` in `sema.tr`.
+2. The monomorphized struct name was mangled two different ways in
+   different places (`Engine_MyConn_MyRS` vs
+   `Engine_MyConn_ptr_MyRS_ptr`) for the exact same instantiation --
+   `synth_class_suffix` (used to name a declared-type lookup, e.g. a local
+   variable's own type) lacked the "strip a trailing `*` without
+   appending `_ptr`" special-case `type_args_suffix` (used for a
+   constructor call's own explicit type args) already had. Fixed by
+   adding the matching special-case to `synth_class_suffix` in
+   `codegen/c.tr`.
+3. A generic method declared `throws E -> T` didn't re-wrap its `return`
+   into a `Result` at the monomorphized call site -- returned the raw
+   pointer where every caller expected a `Result` struct. `ensure_mono`'s
+   method-body-generation loop was the one place in the whole codegen that
+   never set `cur_throws_ty` before generating a method body, unlike every
+   other such loop. Fixed by setting/restoring it there too.
+4. Accessing a generic-typed FIELD from outside its class (e.g.
+   `engine.conn.execute(...)`) fell back to using the literal type
+   parameter name as a function prefix (`C_execute`) instead of the
+   resolved concrete type. The `EPropAccess` (field access) case in
+   `sema.tr` never substituted the field's generic type through the
+   object's own concrete type args, unlike the adjacent `EMethodCall`
+   case, which already did. Fixed by applying the same
+   `_subst_ret_generics` call there.
+
+All four were verified with minimal, DB-unrelated repros before and after
+the fix, then verified STABLE via a gen1->gen2->gen3 self-hosting
+fixpoint: `tauraroc` (gen1, with the fixes) compiled itself to produce
+gen2, gen2 compiled itself to produce gen3, and gen2/gen3 emit
+byte-identical generated C for the same input (the gen1->gen2 and
+gen2->gen3 *binaries* differ byte-for-byte, expected for a compiler with
+no dedicated reproducible-build engineering -- e.g. embedded timestamps --
+but their actual compilation behavior has demonstrably converged). The
+fixed `tauraroc.exe` was then deployed as the machine's canonical
+compiler (old binary kept as a `.bak-<timestamp>` alongside it, matching
+this project's own established convention for that).
+
+One smaller inference gap surfaced integrating `Engine`, worked around
+rather than needing a fifth compiler fix: a bare, un-bracketed static
+factory call (`Engine.wrap(conn)`) relying on inference from the
+assignment target's type annotation didn't emit a matching
+`Engine_wrap` declaration reachable from the call site
+(`implicit declaration of function 'Engine_wrap'`). Explicit type
+arguments on the call (`Engine[SqliteConnection, SqliteResultSet].wrap
+(conn)`, as `tests/test_engine_sqlite.tr` does) sidestep it entirely.
 
 Two non-compiler lessons from actually getting a real test passing, both
 now documented in the adapter files' header comments so they aren't
@@ -287,13 +361,28 @@ rediscovered the same way:
   Postgres's SQLSTATE / SQLite's result code instead of being stuck at `""`.
 - **`get_str`/`column_str`-style accessors return a *borrowed* view into
   the driver's own buffer, not an owned copy** (confirmed by reading
-  `tausqlite3`'s implementation: a raw pointer cast, no allocation).
-  Storing one in a `Vec[str]` across further `step()` calls (SQLite) or
-  past `PgResult.clear()` (Postgres) reads back corrupted memory — hit this
-  as a real, silent-until-runtime bug (`--check` and even a clean compile
-  don't catch it) where a passing-looking build printed garbage instead of
-  the inserted row. Fixed by forcing a copy (`+ ""`) at materialization
-  time; see both dialect files' `_materialize`/`execute()` implementations.
+  `tausqlite3`'s implementation: a raw pointer cast, no allocation), valid
+  only until the buffer is reused or freed. Hit this as a real,
+  silent-until-runtime bug (`--check` and even a clean compile don't catch
+  it): an early version stored `column_str()`'s result in a `Vec[str]`
+  across further `step()` calls, and read back garbage on the next access
+  since SQLite had already reused that buffer for the new row.
+  `SqliteResultSet.get_str()`/`column_name()` force a copy (`+ ""`) for
+  this reason. `PostgresResultSet` doesn't need the same defensive copy:
+  taupostgres's `PgResult` keeps every row's buffer alive until
+  `clear()`/`release()`, a wider validity window than SQLite's per-step
+  reuse, and nothing in the current design stores a value across a call
+  boundary the way the abandoned materialization approach did.
+- **A statement with no result rows (CREATE TABLE, INSERT, ...) does not
+  actually execute in SQLite until `next()`/`step()` is called at least
+  once** -- `execute()` only prepares and binds (see `sqlite_dialect.tr`).
+  Hit this as a real bug: an early version of `dbapi_shared.tr` never
+  called `.next()` on a CREATE TABLE's result, so the table silently never
+  got created, and the very next INSERT failed with "no such table". Fixed
+  by calling `.next()` once on every `execute()` result before use,
+  CREATE/INSERT included -- Postgres already executes inside `execute()`
+  itself, so the same call there is a harmless no-op, making this the
+  correct portable idiom rather than a SQLite-only workaround.
 
 ## What's deferred, and why
 
@@ -319,15 +408,17 @@ rediscovered the same way:
 
 ## Suggested sequencing
 
-1. **Phase 1 — Core dialect boundary.** `dbapi.tr`, `db_error.tr`,
-   `query_result.tr`, both dialect adapters: **done, see Status.**
-   `engine.tr`'s `create_engine(url)` (pick a dialect by URL scheme, own a
-   connection pool) is the one piece of the original Phase 1 scope not yet
-   built — today a consumer constructs `PostgresConnection`/
-   `SqliteConnection` directly rather than through a URL-dispatching
-   `Engine`. Worth doing before Phase 2 starts consuming it, but the harder
-   part (the dialect boundary itself, and proving it against a real,
-   passing test) is the part that was actually uncertain.
+1. **Phase 1 — Core dialect boundary + Engine.** `dbapi.tr`, `db_error.tr`,
+   both dialect adapters (each with its own `DbResultSet`-implementing
+   class), and `engine.tr`'s `Engine[C, RS]`: **done, see Status.** No
+   URL-based `create_engine(url)` dispatching by scheme, deliberately --
+   see `engine.tr`'s header comment: Tauraro has no conditional
+   compilation, so a function importing both dialect adapters to dispatch
+   between them would force every consumer to install both optional
+   backends regardless of which taupkg feature they actually enabled. Each
+   dialect wraps its own connection factory directly instead
+   (`Engine[SqliteConnection, SqliteResultSet].wrap(SqliteConnection.
+   open(path)?)`).
 2. **Phase 2 — Expression language + schema.** `select`/`insert`/`update`/
    `delete` builders, `Table`/`Column`/`types`/constraints, `MetaData.
    create_all`/`drop_all`. Success condition: the same Python-esque query

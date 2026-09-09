@@ -1,31 +1,20 @@
-# tests.test_dbapi_postgres — exercises the Postgres dialect adapter
-# directly. Needs a reachable PostgreSQL server (unlike the SQLite variant,
-# which is in-memory) -- set TAUORM_TEST_PG_CONNINFO or edit the default
-# below. See ../PROPOSAL.md; a docker-based fixture is planned once this
-# package has a docs/ (matching tausqlite3's own tests/README.md pattern
-# for its equivalent gap).
+# tests.test_dbapi_postgres — runs dbapi_shared's generic test suite
+# against the Postgres dialect adapter. Needs a reachable PostgreSQL server
+# (unlike the SQLite variant, which is in-memory) -- set
+# TAUORM_TEST_PG_CONNINFO or edit the default below. See ../PROPOSAL.md; a
+# docker-based fixture is planned once this package has a docs/ (matching
+# tausqlite3's own tests/README.md pattern for its equivalent gap).
 #
 # See test_dbapi_sqlite.tr's header comment for why every throws-call here
-# is bound to an explicit `Result[T, DbError]` rather than `?` or a bare
-# call -- confirmed the hard way that the bare-call form silently
-# miscompiles ("incompatible types ... using type 'Result'") regardless of
-# whether it's inside main() or a regular function.
-#
-# Test logic is duplicated from test_dbapi_sqlite.tr rather than shared
-# through a generic function over the DbConnection interface -- see that
-# file's header comment for the real tauraroc codegen bug (mis-generated
-# calls on a concrete return type inside a monomorphized generic body) that
-# forced this. Both dialect adapters still satisfy the SAME DbConnection
-# interface at the concrete level (dbapi.tr); only generic dispatch THROUGH
-# it is affected.
+# is bound to an explicit `Result[T, E]` rather than `?` or a bare call.
 #
 # Only imports what `--features postgres` installs; see
 # postgres_dialect.tr's header comment for why this can't live in one file
 # together with the SQLite variant.
 
-from postgres_dialect import PostgresConnection
+from postgres_dialect import PostgresConnection, PostgresResultSet
 from db_error import DbError
-from query_result import QueryResultSet
+from dbapi_shared import run_shared_tests
 from std.core.vec import Vec
 from std.os import Env
 from std.test import TestRunner
@@ -41,45 +30,15 @@ def main():
         t.fail("could not open Postgres connection (" + conninfo + "): " + open_r.err.message)
         t.summary()
         return
+
     mut conn = open_r.ok
     mut no_params: Vec[str] = Vec[str].init(0)
-
-    mut drop_r: Result[QueryResultSet, DbError] = conn.execute("DROP TABLE IF EXISTS t_users", no_params)
+    mut drop_r: Result[PostgresResultSet, DbError] = conn.execute("DROP TABLE IF EXISTS t_users", no_params)
     if drop_r.is_err:
         t.fail("DROP TABLE failed: " + drop_r.err.message)
         t.summary()
         return
-    drop_r.ok.close()
+    drop_r.ok.release()
 
-    mut create_r: Result[QueryResultSet, DbError] = conn.execute("CREATE TABLE t_users(id SERIAL PRIMARY KEY, name TEXT)", no_params)
-    if create_r.is_err:
-        t.fail("CREATE TABLE failed: " + create_r.err.message)
-        t.summary()
-        return
-    create_r.ok.close()
-
-    mut ins_r: Result[QueryResultSet, DbError] = conn.execute("INSERT INTO t_users(name) VALUES ('Ada')", no_params)
-    if ins_r.is_err:
-        t.fail("INSERT failed: " + ins_r.err.message)
-        t.summary()
-        return
-    mut ins_rs = ins_r.ok
-    t.assert_eq_int(ins_rs.rows_affected(), 1, "insert affects 1 row")
-    ins_rs.close()
-
-    mut sel_r: Result[QueryResultSet, DbError] = conn.execute("SELECT id, name FROM t_users", no_params)
-    if sel_r.is_err:
-        t.fail("SELECT failed: " + sel_r.err.message)
-        t.summary()
-        return
-    mut sel_rs = sel_r.ok
-    mut got_row = false
-    while sel_rs.next():
-        got_row = true
-        t.assert_eq_str(sel_rs.get_str(1), "Ada", "selected row has the inserted name")
-        t.assert_true(not sel_rs.is_null(0), "id column is not null")
-    t.assert_true(got_row, "SELECT returned at least one row")
-    sel_rs.close()
-
-    conn.close()
+    run_shared_tests(t, conn)
     t.summary()

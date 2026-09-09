@@ -1,0 +1,91 @@
+# tauorm.engine — Engine[C, RS]: a thin, dialect-agnostic wrapper around a
+# single open DbConnection. This is the stable type later phases (the SQL
+# expression language's execution, and Phase 3's Session) depend on,
+# instead of calling PostgresConnection/SqliteConnection directly -- ORM
+# code written against Engine doesn't change when the underlying dialect
+# does.
+#
+# No connection pooling yet, deliberately: pooling only earns its
+# complexity once there's a real consumer checking connections in and out
+# (Phase 3's Session, doing one connection per unit of work) to design
+# against. taupostgres already has its own Pool; tausqlite3 doesn't. A
+# pooling Engine variant is a natural follow-on once Session exists to
+# prove it against, not before -- see PROPOSAL.md's Status/sequencing.
+#
+# There's no URL-based create_engine(url) dispatching between dialects by
+# scheme either, and there won't be one in this file: Tauraro has no
+# conditional compilation, so a function that imports BOTH
+# postgres_dialect.tr and sqlite_dialect.tr to dispatch between them would
+# force every consumer to have both optional backends installed regardless
+# of which taupkg feature they actually enabled (see tauorm.tr's header
+# comment for the same constraint on the hub). Each dialect instead wraps
+# its own connection factory directly, e.g. `Engine.wrap(SqliteConnection.
+# open(":memory:")?)` -- see tests/test_engine_sqlite.tr.
+#
+# Building this surfaced 4 real tauraroc bugs, all specific to generic
+# CLASSES with two cross-referencing type parameters (generic FUNCTIONS
+# with the identical DbConnection[RS]/DbResultSet bounds -- see
+# tests/dbapi_shared.tr -- were unaffected throughout). All four are now
+# fixed upstream and verified via a gen1->gen2->gen3 self-hosting fixpoint
+# (gen2 and gen3 emit byte-identical generated C for the same input); see
+# PROPOSAL.md's Status section for the full account. In order found:
+#   1. A CLASS's (not a function's) bound-satisfaction check for a second,
+#      cross-referenced type parameter only resolved correctly when that
+#      parameter's name was a single character -- `_is_type_param_in_scope`
+#      only ever checked the enclosing FUNCTION's own generics, never the
+#      enclosing CLASS's, falling back to a strlen==1 heuristic that
+#      happened to catch single-letter names by coincidence.
+#   2. The monomorphized struct name was mangled two different ways in
+#      different places (`Engine_MyConn_MyRS` vs
+#      `Engine_MyConn_ptr_MyRS_ptr`) -- `synth_class_suffix` (used for a
+#      declared-type lookup) lacked the same "strip a trailing '*' without
+#      appending '_ptr'" special-case `type_args_suffix` (used for a
+#      constructor call's own type args) already had.
+#   3. A generic method declared `throws E -> T` didn't re-wrap its
+#      `return` into a `Result` at the monomorphized call site --
+#      `ensure_mono`'s method-body-generation loop was the one place that
+#      never set `cur_throws_ty` before generating a method body, unlike
+#      every other such loop in the codegen.
+#   4. Accessing a generic-typed FIELD from outside the class (e.g.
+#      `engine.conn.execute(...)`) fell back to using the literal type
+#      parameter name as a function prefix (`C_execute`) instead of the
+#      resolved concrete type -- the EPropAccess case never substituted
+#      the field's generic type through the object's own concrete type
+#      args, unlike the adjacent EMethodCall case, which already did.
+
+from dbapi import DbConnection, DbResultSet
+from db_error import DbError
+from std.core.vec import Vec
+
+pub class Engine[C: DbConnection[RS], RS: DbResultSet]:
+    pub conn: C
+
+extend Engine[C, RS]:
+    pub def wrap(conn: C) -> Engine[C, RS]:
+        mut e = Engine[C, RS]()
+        e.conn = conn
+        return e
+
+    pub def execute(self, sql: str, params: Vec[str]) throws DbError -> RS:
+        mut r: Result[RS, DbError] = self.conn.execute(sql, params)
+        if r.is_err:
+            raise(DbError.init(r.err.code, r.err.message))
+        return r.ok
+
+    pub def begin(self) throws DbError:
+        mut r: Result[void, DbError] = self.conn.begin()
+        if r.is_err:
+            raise(DbError.init(r.err.code, r.err.message))
+
+    pub def commit(self) throws DbError:
+        mut r: Result[void, DbError] = self.conn.commit()
+        if r.is_err:
+            raise(DbError.init(r.err.code, r.err.message))
+
+    pub def rollback(self) throws DbError:
+        mut r: Result[void, DbError] = self.conn.rollback()
+        if r.is_err:
+            raise(DbError.init(r.err.code, r.err.message))
+
+    pub def release(self):
+        self.conn.release()

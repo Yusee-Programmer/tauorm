@@ -1,22 +1,67 @@
-# tauorm.core.dbapi — the narrow interface boundary every dialect adapter
-# must satisfy. Modeled on Python's DB-API 2.0 / SQLAlchemy's own DBAPI
-# layer: a handful of primitive operations (execute, transaction control)
-# that Core's SQL expression language, schema layer, and ORM are all built
-# on top of -- none of them ever touch a concrete driver directly.
+# tauorm.dbapi — the narrow interface boundary every dialect adapter must
+# satisfy. Modeled on Python's DB-API 2.0 / SQLAlchemy's own DBAPI layer: a
+# handful of primitive operations (execute, step through rows, read
+# columns, transaction control) that Core's SQL expression language,
+# schema layer, and ORM are all built on top of -- none of them ever touch
+# a concrete driver directly.
 #
-# A single, non-generic interface returning the one shared QueryResultSet
-# class (see query_result.tr's header comment for why: an earlier
-# generic-per-dialect-result-type design hit two real tauraroc compiler
-# limitations -- a segfault on mutually-referential generic bounds, and
-# missing dynamic-dispatch boxing for bare interface return types).
+# `DbConnection[RS: DbResultSet]` is generic over its own dialect's
+# result-set type -- each dialect's `execute()` returns ITS OWN concrete
+# class (PostgresResultSet/SqliteResultSet), streaming through its own
+# driver's natural cursor model, rather than both dialects converging on a
+# single shared, eagerly-materialized class. This is the originally-planned
+# design; an earlier pass had to fall back to one shared concrete
+# QueryResultSet class after hitting several tauraroc generics/interface
+# bugs (mutually-referential bound crash, no bare-interface-return boxing,
+# mis-codegen for generic-bound method calls, multi-arg generic-call
+# parsing/inference) -- all now fixed upstream, so this restores the
+# proper per-dialect design. See postgres_dialect.tr/sqlite_dialect.tr's
+# header comments and PROPOSAL.md's Status section for the history.
 
 from db_error import DbError
-from query_result import QueryResultSet
 from std.core.vec import Vec
 
-pub interface DbConnection:
-    def execute(self, sql: str, params: Vec[str]) throws DbError -> QueryResultSet
+pub interface DbResultSet:
+    def column_count(self) -> int
+    def column_name(self, idx: int) -> str
+    # Advances to the next row. True if a row is now available (read it via
+    # get_*()/is_null() before calling next() again); false once exhausted.
+    def next(self) throws DbError -> bool
+    def get_str(self, idx: int) -> str
+    def get_int(self, idx: int) -> int
+    def get_float(self, idx: int) -> float
+    def get_bool(self, idx: int) -> bool
+    def is_null(self, idx: int) -> bool
+    # Rows affected by an INSERT/UPDATE/DELETE (0 for a SELECT).
+    def rows_affected(self) -> int
+    # Named release(), not close(): the interface-vtable-wrapper codegen
+    # emits a plain (non-keyword-escaped) function name for a vtable slot's
+    # initializer, but `close` collides with POSIX close(fd) and gets
+    # escaped to `_tr_fn_close` everywhere else in the generated C -- the
+    # mismatch is an undefined-reference link failure. Reproduced directly;
+    # sidestepped by not using a C-stdlib-colliding name here.
+    def release(self)
+
+#
+# DbConnection[RS] is deliberately UNBOUNDED here (not `[RS: DbResultSet]`)
+# -- a bound on a generic INTERFACE's own type parameter hangs tauraroc
+# outright, reproduced with a minimal 2-interface repro with no DB code at
+# all (`interface Baz[X: Foo]:` alone hangs `--check`; `interface Baz[X]:`
+# with no bound does not). The `RS: DbResultSet` constraint still applies
+# everywhere that matters -- every generic FUNCTION/CLASS that uses
+# DbConnection binds it explicitly (see tests/dbapi_shared.tr's
+# `run_shared_tests[C: DbConnection[RS], RS: DbResultSet]`) -- this only
+# drops the (currently unsupported) redundant copy of that same bound on
+# the interface declaration itself.
+pub interface DbConnection[RS]:
+    def execute(self, sql: str, params: Vec[str]) throws DbError -> RS
     def begin(self) throws DbError
     def commit(self) throws DbError
     def rollback(self) throws DbError
-    def close(self)
+    # Named release(), not close(): the interface-vtable-wrapper codegen
+    # emits a plain (non-keyword-escaped) function name for a vtable slot's
+    # initializer, but `close` collides with POSIX close(fd) and gets
+    # escaped to `_tr_fn_close` everywhere else in the generated C -- the
+    # mismatch is an undefined-reference link failure. Reproduced directly;
+    # sidestepped by not using a C-stdlib-colliding name here.
+    def release(self)

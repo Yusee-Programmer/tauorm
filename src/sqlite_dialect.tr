@@ -1,11 +1,21 @@
-# tauorm.sqlite_dialect — the SQLite DbConnection implementation, wrapping
-# tausqlite3's Connection/Statement.
+# tauorm.sqlite_dialect — the SQLite DbConnection/DbResultSet
+# implementation, wrapping tausqlite3's Connection/Statement.
 #
-# tausqlite3's Statement is naturally a step-cursor; execute() here steps
-# through it to completion immediately, materializing every row into a
-# QueryResultSet the same way the Postgres adapter does from its own
-# already-materialized PgResult -- see query_result.tr's header comment for
-# why both dialects converge on one shared, eagerly-materialized shape.
+# tausqlite3's Statement is already a step-cursor, so SqliteResultSet is a
+# thin wrapper: next() delegates straight to stmt.step(), which already
+# returns exactly dbapi.tr's next() contract (true = a row is available,
+# false = exhausted).
+#
+# get_str() forces a copy (`+ ""`) rather than returning tausqlite3's
+# column_str() result directly: that's a raw pointer cast into SQLite's own
+# column buffer (confirmed by reading tausqlite3's implementation -- no
+# allocation happens), valid only until the NEXT step() call reuses it.
+# Caught this the hard way as a real, silent-until-runtime bug: a caller
+# that stores a row's string across an iteration (the normal thing to do)
+# read back corrupted memory despite a clean compile. Postgres's
+# PostgresResultSet doesn't need the same defensive copy -- taupostgres's
+# PgResult keeps every row alive until close()/clear(), a wider validity
+# window than SQLite's per-step reuse.
 #
 # execute()'s `params: Vec[str]` binds every parameter as text via
 # bind_str(), matching taupostgres's exec_params() (all-text params) rather
@@ -16,28 +26,73 @@
 # execute() path (mirroring taupostgres's exec_params_binary()) can follow
 # later without changing this interface.
 #
+# `implements DbConnection[SqliteResultSet]` is explicit -- see
+# postgres_dialect.tr's header comment for why.
+#
 # NOT re-exported by tauorm.tr's hub -- see postgres_dialect.tr's header
 # comment; the same reasoning applies (this module requires the `sqlite3`
 # package / taupkg's `sqlite` feature).
 #
-# Error translation: a bare call to a `throws E` function (no `?`) yields
-# the raw `Result[T, E]` rather than auto-raising or auto-unwrapping (see
-# tests/lang/05_error_handling.tr's "mixed models" section upstream) --
-# `?` itself does an early RETURN of the Err Result directly to the
-# caller, bypassing any try/except in the SAME function, so it can't be
-# used here either. Every SQLite call is therefore checked via
-# `.is_err`/`.ok`/`.err` and re-raised as DbError, which also means
-# SqliteError's structured `code` survives into DbError.code (unlike an
-# earlier version of this file that went through `except e:`, which binds
-# only the exception's stringified form -- confirmed empirically, see
-# postgres_dialect.tr's header comment for that dead end).
+# Error translation: see postgres_dialect.tr's header comment on the
+# Result[T,E]-based idiom used throughout -- it's what lets SqliteError's
+# structured `code` survive into DbError.code.
 
 from sqlite3 import Connection, Statement, SqliteError
+from dbapi import DbConnection
 from db_error import DbError
-from query_result import QueryResultSet
 from std.core.vec import Vec
 
-pub class SqliteConnection:
+pub class SqliteResultSet:
+    pub stmt: Statement
+    pub conn: Connection
+
+extend SqliteResultSet:
+    pub def wrap(stmt: Statement, conn: Connection) -> SqliteResultSet:
+        mut rs = SqliteResultSet()
+        rs.stmt = stmt
+        rs.conn = conn
+        return rs
+
+    pub def column_count(self) -> int:
+        return self.stmt.column_count()
+
+    pub def column_name(self, idx: int) -> str:
+        return self.stmt.column_name(idx) + ""
+
+    pub def next(self) throws DbError -> bool:
+        mut r: Result[bool, SqliteError] = self.stmt.step()
+        if r.is_err:
+            raise(DbError.init(r.err.code.to_str(), r.err.message))
+        return r.ok
+
+    pub def get_str(self, idx: int) -> str:
+        return self.stmt.column_str(idx) + ""
+
+    pub def get_int(self, idx: int) -> int:
+        return self.stmt.column_int(idx)
+
+    pub def get_float(self, idx: int) -> float:
+        return self.stmt.column_float(idx)
+
+    pub def get_bool(self, idx: int) -> bool:
+        return self.stmt.column_int(idx) != 0
+
+    pub def is_null(self, idx: int) -> bool:
+        return self.stmt.column_is_null(idx)
+
+    # SQLite's changes() is a CONNECTION-level count of rows changed by the
+    # most recently completed INSERT/UPDATE/DELETE -- accurate here as long
+    # as callers finish stepping a write statement to completion (DONE)
+    # before reading rows_affected(), the same expectation SQLite itself
+    # has of sqlite3_changes().
+    pub def rows_affected(self) -> int:
+        return self.conn.changes()
+
+    pub def release(self):
+        self.stmt.finalize()
+
+
+pub class SqliteConnection implements DbConnection[SqliteResultSet]:
     pub conn: Connection
 
 extend SqliteConnection:
@@ -49,7 +104,7 @@ extend SqliteConnection:
         sc.conn = r.ok
         return sc
 
-    pub def execute(self, sql: str, params: Vec[str]) throws DbError -> QueryResultSet:
+    pub def execute(self, sql: str, params: Vec[str]) throws DbError -> SqliteResultSet:
         mut prep: Result[Statement, SqliteError] = self.conn.prepare(sql)
         if prep.is_err:
             raise(DbError.init(prep.err.code.to_str(), prep.err.message))
@@ -62,40 +117,7 @@ extend SqliteConnection:
                 raise(DbError.init(br.err.code.to_str(), br.err.message))
             i = i + 1
 
-        mut ncols = stmt.column_count()
-        mut names: Vec[str] = Vec[str].init(ncols)
-        mut ci = 0
-        while ci < ncols:
-            names.push(stmt.column_name(ci) + "")
-            ci = ci + 1
-
-        mut rows: Vec[Vec[str]] = Vec[Vec[str]].init(8)
-        mut nulls: Vec[Vec[bool]] = Vec[Vec[bool]].init(8)
-        mut stepping = true
-        while stepping:
-            mut sr: Result[bool, SqliteError] = stmt.step()
-            if sr.is_err:
-                raise(DbError.init(sr.err.code.to_str(), sr.err.message))
-            if not sr.ok:
-                stepping = false
-            else:
-                mut vals: Vec[str] = Vec[str].init(ncols)
-                mut is_null_row: Vec[bool] = Vec[bool].init(ncols)
-                mut cj = 0
-                while cj < ncols:
-                    if stmt.column_is_null(cj):
-                        vals.push("")
-                        is_null_row.push(true)
-                    else:
-                        vals.push(stmt.column_str(cj) + "")
-                        is_null_row.push(false)
-                    cj = cj + 1
-                rows.push(vals)
-                nulls.push(is_null_row)
-
-        mut affected = self.conn.changes()
-        stmt.finalize()
-        return QueryResultSet.init(names, rows, nulls, affected)
+        return SqliteResultSet.wrap(stmt, self.conn)
 
     pub def begin(self) throws DbError:
         mut r: Result[void, SqliteError] = self.conn.begin()
@@ -112,5 +134,5 @@ extend SqliteConnection:
         if r.is_err:
             raise(DbError.init(r.err.code.to_str(), r.err.message))
 
-    pub def close(self):
+    pub def release(self):
         self.conn.close()
