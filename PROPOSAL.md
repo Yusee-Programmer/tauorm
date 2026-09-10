@@ -595,6 +595,78 @@ header comment), and EXPLICIT dirty tracking (`session.mark_dirty(obj)`)
 rather than SQLAlchemy's transparent attribute-change interception, which
 Tauraro has no hook (`__setattr__`-equivalent) to implement honestly.
 
+**Phase 4 (relationships) is done and verified for real** --
+`test_relationship_sqlite.tr` defines `User`/`Post` (both `@mapped`,
+`Post.user_id` an int FK column), seeds one user with two of their posts
+plus a third post pointing at a never-inserted user id, then exercises
+both directions against real in-memory SQLite: `load_many` returns
+exactly the two real posts (not "everything"), `load_one` resolves a
+post's author, and `load_one` on the dangling FK correctly fails with
+`DbError("NOT_FOUND", ...)` (6 assertions, all passing). `column.tr`
+gained `.references(table, column)` so a Table can document a foreign
+key in its own DDL (`REFERENCES table(col)`) -- purely descriptive;
+SQLite doesn't enforce it without an explicit `PRAGMA`, and neither
+`load_many` nor `load_one` depend on it to work.
+
+There is deliberately no SQLAlchemy-style lazy relationship PROXY (no
+`user.posts` attribute that transparently queries on first access) --
+same reasoning as Session's explicit dirty tracking: Tauraro has no
+`__getattr__`-equivalent hook to intercept a plain field read. Both
+directions are a single explicit call instead (`relationship.tr`'s
+header comment spells out when to reach for `load_one` vs. an existing
+`Session.get()` for the same read).
+
+This surfaced the session's **8th real `tauraroc` bug, the most serious
+one found** -- not a compile error but silent memory corruption at
+runtime, no diagnostic at all. Calling a `def(...)->R` FIELD (e.g.
+`Mapper[T].load: def(DbResultSet) -> T`, called as `mapper.load(rs)`
+where `rs`'s static type is a generic parameter `RS` monomorphized to a
+concrete class implementing the interface `DbResultSet`) derived the
+indirect call's C function-pointer CAST from the ARGUMENT's own type
+(`SqliteResultSet*`, 8 bytes) instead of the FIELD's actually-declared
+parameter type (the interface, boxed as `DbResultSet_obj`, a 16-byte
+`{vtable, data}` struct) -- a `TrFnVal`-indirect call is one unchecked
+`void*`-typed cast, so the mismatched arity/size compiled cleanly and
+corrupted the stack at the call. Root-caused with a minimal, DB-unrelated
+repro (an `interface Shape`/`class Square implements Shape` pair, no
+tauorm code at all) before touching anything in tauorm. Fixed in
+`codegen/c.tr`'s indirect-call code path: the cast signature now prefers
+the callee's own declared parameter types (only where they resolve, via
+the active `type_subst`, to an actual interface name -- otherwise the
+argument's own type is still used, unchanged, since that's correct for
+every non-interface case), and arguments are boxed into that interface
+(`SqliteResultSet_as_DbResultSet(rs)`) the same way an ordinary
+non-indirect call's arguments already were.
+
+Fixing that surfaced two smaller, adjacent issues, both fixed alongside it:
+
+- The interface-vtable wrap function itself (`SqliteResultSet_as_
+  DbResultSet`) is emitted once per (non-generic class, interface) pair,
+  but that emission pass ran AFTER monomorphized generic function bodies
+  in the overall output -- a monomorphized body calling the wrap function
+  (as fix #8 now does) hit it before it was declared, an implicit
+  wrong-type declaration and a real, loud compile error (not a crash;
+  reordering was needed to get to the crash fix above at all). Fixed by
+  moving that emission earlier, before monomorphized bodies, in
+  `codegen/c.tr`'s top-level `generate()`.
+- The wrap function is *only* ever generated for a class with an
+  EXPLICIT `implements InterfaceName` clause -- a class satisfying an
+  interface purely STRUCTURALLY (the normal way a generic bound like
+  `RS: DbResultSet` is satisfied throughout this project, deliberately,
+  since Phase 1) never gets one, because nothing records that
+  relationship for this pass to find. This is existing, working-as-
+  designed behavior, not a bug -- but `SqliteResultSet`/
+  `PostgresResultSet` need it now that `Mapper[T].load` boxes into
+  `DbResultSet`, so both dialect adapters were given an explicit
+  `implements DbResultSet` (previously implicit/structural only); see
+  `sqlite_dialect.tr`'s header comment.
+
+All three (crash fix + reordering + explicit `implements`) were verified
+together via the same gen1->gen2->gen3 self-hosting fixpoint and full
+test-suite run as every other fix this session (no regressions; same 3
+pre-existing, unrelated failures as always), then the compiler was
+re-blessed.
+
 ## What's deferred, and why
 
 - **Migrations** (an Alembic equivalent — versioned schema changes,
@@ -644,8 +716,15 @@ Tauraro has no hook (`__setattr__`-equivalent) to implement honestly.
    entities, `Mapper[T]`, an identity map, and a unit of work handling
    single-table insert/update/delete ordering: **done, see Status.**
    No relationships yet.
-4. **Phase 4 — Relationships.** one-to-many/many-to-one/one-to-one,
-   many-to-many via association tables, lazy vs. joined loading.
+4. **Phase 4 — Relationships.** one-to-many (`load_many`) and many-to-one
+   (`load_one`) between `@mapped` entities, plus FK column metadata
+   (`Column.references()`): **done, see Status.** One-to-one is the same
+   `load_one` call against a column with a `.is_unique()` constraint, no
+   new code needed. Many-to-many via association tables and joined
+   (as opposed to explicit N+1) loading are not built -- no concrete need
+   has driven their design yet; picking them up alongside real usage
+   (rather than speculatively) matches how Phase 2 deferred FK/join
+   support until Phase 4 actually needed it.
 5. **Phase 5 — Async.** `AsyncEngine`/`AsyncConnection`/`AsyncSession` per
    the "Sync and async" section above, exercised against both dialects.
 6. **Phase 6 (backlog, not scheduled).** Migrations, additional dialects,

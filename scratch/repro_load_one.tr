@@ -1,0 +1,67 @@
+# Isolate: does load_one (not yet exercised, unlike load_many) also crash?
+
+from mapped import mapped
+from mapper import Mapper
+from relationship import load_one
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from engine import Engine
+from db_error import DbError
+from metadata import MetaData, create_all
+from dbapi import DbResultSet
+from std.core.vec import Vec
+from table import Table
+from column import Column
+from col_types import Integer, Text
+from insert_stmt import insert
+
+@mapped
+class User:
+    pub id: int
+    pub name: str
+
+def main():
+    print("start")
+    mut ut = User.__table()
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        print("open failed")
+        return
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+    mut md = MetaData.init()
+    md.add(ut)
+    mut create_res: Result[bool, DbError] = create_all[SqliteConnection, SqliteResultSet](md, engine, "sqlite")
+    if create_res.is_err:
+        print("create_all failed: " + create_res.err.message)
+        return
+    print("table created")
+
+    mut user_mapper: Mapper[User] = Mapper[User].init(User.__table(), User.from_row, User.dump, User.key_of)
+    mut u1 = User()
+    u1.id = 1
+    u1.name = "Ada"
+    mut vals = user_mapper.dump(u1)
+    mut names: Vec[str] = Vec[str].init(2)
+    names.push("id")
+    names.push("name")
+    mut compiled = insert(ut).values(names, vals).compile("sqlite")
+    mut ins_r: Result[SqliteResultSet, DbError] = engine.execute(compiled.sql, compiled.params)
+    if ins_r.is_err:
+        print("insert failed: " + ins_r.err.message)
+        return
+    mut ins_rs = ins_r.ok
+    mut ins_step: Result[bool, DbError] = ins_rs.next()
+    if ins_step.is_err:
+        print("insert step failed")
+        return
+    ins_rs.release()
+    print("inserted")
+
+    print("about to call load_one")
+    mut result: Result[User, DbError] = load_one[User, SqliteConnection, SqliteResultSet](engine, "sqlite", user_mapper, 1)
+    print("load_one returned")
+    if result.is_err:
+        print("failed: " + result.err.message)
+        return
+    print("name=" + result.ok.name)
+    engine.release()
+    print("done")

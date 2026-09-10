@@ -29,6 +29,19 @@
 # `implements DbConnection[SqliteResultSet]` is explicit -- see
 # postgres_dialect.tr's header comment for why.
 #
+# `SqliteResultSet implements DbResultSet` is ALSO explicit (not left as a
+# purely structural match), for a reason Phase 4 (relationships) surfaced
+# directly: tauraroc only generates a class-to-interface "boxing" wrapper
+# (`SqliteResultSet_as_DbResultSet`, needed to pass a concrete result-set
+# value into `Mapper[T].load: def(DbResultSet) -> T`, a FIELD declared in
+# terms of the interface) for classes with an EXPLICIT `implements`
+# clause -- a class satisfying an interface purely structurally (the
+# usual case for a generic bound like `RS: DbResultSet`, which only needs
+# the right methods to exist) never gets one, since nothing records that
+# it implements that interface at all. Without this, the wrapper is
+# silently never emitted and the boxing call at Mapper[T].load's use site
+# is an "implicit declaration" compile error (confirmed directly).
+#
 # NOT re-exported by tauorm.tr's hub -- see postgres_dialect.tr's header
 # comment; the same reasoning applies (this module requires the `sqlite3`
 # package / taupkg's `sqlite` feature).
@@ -38,11 +51,11 @@
 # structured `code` survive into DbError.code.
 
 from sqlite3 import Connection, Statement, SqliteError
-from dbapi import DbConnection
+from dbapi import DbConnection, DbResultSet
 from db_error import DbError
 from std.core.vec import Vec
 
-pub class SqliteResultSet:
+pub class SqliteResultSet implements DbResultSet:
     pub stmt: Statement
     pub conn: Connection
 

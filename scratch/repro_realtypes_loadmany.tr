@@ -1,0 +1,108 @@
+# Same call shape as relationship.tr's load_many, but using the REAL
+# dbapi/engine/mapper types with a drastically simplified body, to see
+# if the crash is in calling/monomorphizing the 3-type-param generic
+# function itself, or specifically in its query logic.
+
+from mapped import mapped
+from mapper import Mapper
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from engine import Engine
+from db_error import DbError
+from metadata import MetaData, create_all
+from dbapi import DbConnection, DbResultSet
+from std.core.vec import Vec
+from table import Table
+from column import Column
+from col_types import Integer, Text
+from expression import col, lit, eq
+from select_stmt import select_from
+from insert_stmt import insert
+
+@mapped
+class Post:
+    pub id: int
+    pub user_id: int
+    pub title: str
+
+def trivial_load_many[C, K: DbConnection[RS], RS: DbResultSet](engine: Engine[K, RS], dialect: str, mapper: Mapper[C], fk_column: str, parent_id: str) throws DbError -> Vec[C]:
+    print("start of trivial_load_many")
+    mut sel = select_from(mapper.table).where(eq(col(fk_column), lit(parent_id))).compile(dialect)
+    print("compiled: " + sel.sql)
+    mut r: Result[RS, DbError] = engine.execute(sel.sql, sel.params)
+    print("executed")
+    if r.is_err:
+        raise(DbError.init(r.err.code, r.err.message))
+    print("no error")
+    mut rs = r.ok
+    print("got rs")
+    mut out: Vec[C] = Vec[C].init(4)
+    mut step: Result[bool, DbError] = rs.next()
+    print("stepped once, is_err=" + step.is_err.to_str())
+    while not step.is_err and step.ok:
+        print("loop: got a row")
+        out.push(mapper.load(rs))
+        print("loop: pushed")
+        step = rs.next()
+        print("loop: stepped again")
+    print("loop done")
+    if step.is_err:
+        rs.release()
+        raise(DbError.init(step.err.code, step.err.message))
+    rs.release()
+    print("released")
+    return out
+
+def main():
+    print("start")
+    mut pt = Post.__table()
+    print("table built")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        print("open failed")
+        return
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+    print("engine wrapped")
+
+    mut post_mapper: Mapper[Post] = Mapper[Post].init(Post.__table(), Post.from_row, Post.dump, Post.key_of)
+    print("mapper built")
+
+    mut md = MetaData.init()
+    md.add(pt)
+    mut create_res: Result[bool, DbError] = create_all[SqliteConnection, SqliteResultSet](md, engine, "sqlite")
+    if create_res.is_err:
+        print("create_all failed: " + create_res.err.message)
+        return
+    print("table created")
+
+    mut p1 = Post()
+    p1.id = 1
+    p1.user_id = 1
+    p1.title = "First"
+    mut vals = post_mapper.dump(p1)
+    mut names: Vec[str] = Vec[str].init(3)
+    names.push("id")
+    names.push("user_id")
+    names.push("title")
+    mut compiled_ins = insert(pt).values(names, vals).compile("sqlite")
+    mut ins_r: Result[SqliteResultSet, DbError] = engine.execute(compiled_ins.sql, compiled_ins.params)
+    if ins_r.is_err:
+        print("insert failed: " + ins_r.err.message)
+        return
+    mut ins_rs = ins_r.ok
+    mut ins_step: Result[bool, DbError] = ins_rs.next()
+    if ins_step.is_err:
+        print("insert step failed: " + ins_step.err.message)
+        return
+    ins_rs.release()
+    print("post inserted")
+
+    print("about to call trivial_load_many")
+    mut result: Result[Vec[Post], DbError] = trivial_load_many[Post, SqliteConnection, SqliteResultSet](engine, "sqlite", post_mapper, "user_id", "1")
+    if result.is_err:
+        print("failed: " + result.err.message)
+        return
+    print("returned, len=" + result.ok.len.to_str())
+
+    engine.release()
+    print("done")

@@ -15,6 +15,15 @@ pub class Column:
     pub primary_key:   bool
     pub nullable:      bool
     pub unique:        bool
+    # Foreign key target: "" / "" when this column isn't one. Phase 4
+    # (relationships) is the first consumer -- see relationship.tr's
+    # load_many()/load_one(), which query by the FK column's VALUE and
+    # don't actually need this DDL-level metadata to function (SQLite
+    # doesn't even enforce FK constraints unless a session explicitly
+    # turns on `PRAGMA foreign_keys`), but a Table that's meant to
+    # document its own relationships honestly should still carry it.
+    pub ref_table:     str
+    pub ref_column:    str
 
 extend Column:
     pub def init(name: str, col_type: ColumnType) -> Column:
@@ -24,6 +33,8 @@ extend Column:
         c.primary_key = false
         c.nullable = true
         c.unique = false
+        c.ref_table = ""
+        c.ref_column = ""
         return c
 
     pub def pk(self) -> Column:
@@ -37,6 +48,13 @@ extend Column:
 
     pub def is_unique(self) -> Column:
         self.unique = true
+        return self
+
+    # Marks this column as a foreign key referencing another table's
+    # column, e.g. `Column.init("user_id", Integer()).references("User", "id")`.
+    pub def references(self, table: str, column: str) -> Column:
+        self.ref_table = table
+        self.ref_column = column
         return self
 
     # The DDL fragment for this column inside a CREATE TABLE's column list,
@@ -56,4 +74,6 @@ extend Column:
             sql = sql + " NOT NULL"
         if self.unique:
             sql = sql + " UNIQUE"
+        if self.ref_table != "":
+            sql = sql + " REFERENCES " + self.ref_table + "(" + self.ref_column + ")"
         return sql

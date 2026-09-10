@@ -1,0 +1,131 @@
+# Isolate: does having TWO @mapped classes in the same file, both used,
+# crash even before any DB operation happens?
+
+from mapped import mapped
+from mapper import Mapper
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from engine import Engine
+from db_error import DbError
+from metadata import MetaData, create_all
+from std.core.vec import Vec
+from table import Table
+from column import Column
+from col_types import Integer, Text
+from dbapi import DbResultSet
+from insert_stmt import insert
+from relationship import load_many, load_one
+
+@mapped
+class User:
+    pub id: int
+    pub name: str
+
+@mapped
+class Post:
+    pub id: int
+    pub user_id: int
+    pub title: str
+
+def main():
+    print("start")
+    mut ut = User.__table()
+    mut pt = Post.__table()
+    print("tables built")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        print("open failed: " + open_r.err.message)
+        return
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+    print("engine wrapped")
+
+    mut md = MetaData.init()
+    md.add(ut)
+    md.add(pt)
+    mut create_res: Result[bool, DbError] = create_all[SqliteConnection, SqliteResultSet](md, engine, "sqlite")
+    if create_res.is_err:
+        print("create_all failed: " + create_res.err.message)
+        return
+    print("tables created")
+
+    mut user_mapper: Mapper[User] = Mapper[User].init(User.__table(), User.from_row, User.dump, User.key_of)
+    print("user mapper built")
+    mut post_mapper: Mapper[Post] = Mapper[Post].init(Post.__table(), Post.from_row, Post.dump, Post.key_of)
+    print("post mapper built")
+
+    mut u1 = User()
+    u1.id = 1
+    u1.name = "Ada"
+    mut ins_u: Vec[str] = user_mapper.dump(u1)
+    print("user dumped, n=" + ins_u.len.to_str())
+    mut names_u: Vec[str] = Vec[str].init(2)
+    names_u.push("id")
+    names_u.push("name")
+    mut ins_u_compiled = insert(ut).values(names_u, ins_u).compile("sqlite")
+    print("insert sql: " + ins_u_compiled.sql)
+    mut ins_u_r: Result[SqliteResultSet, DbError] = engine.execute(ins_u_compiled.sql, ins_u_compiled.params)
+    if ins_u_r.is_err:
+        print("insert user failed: " + ins_u_r.err.message)
+        return
+    print("user insert executed")
+    mut ins_u_rs = ins_u_r.ok
+    mut ins_u_step: Result[bool, DbError] = ins_u_rs.next()
+    if ins_u_step.is_err:
+        print("insert user step failed: " + ins_u_step.err.message)
+        return
+    print("user insert stepped")
+    ins_u_rs.release()
+    print("user insert rs released")
+
+    mut names_p: Vec[str] = Vec[str].init(3)
+    names_p.push("id")
+    names_p.push("user_id")
+    names_p.push("title")
+
+    mut p1 = Post()
+    p1.id = 1
+    p1.user_id = 1
+    p1.title = "First post"
+    mut p2 = Post()
+    p2.id = 2
+    p2.user_id = 1
+    p2.title = "Second post"
+    print("posts constructed")
+
+    mut posts_to_insert: Vec[Post] = Vec[Post].init(2)
+    posts_to_insert.push(p1)
+    posts_to_insert.push(p2)
+    print("posts vec built, len=" + posts_to_insert.len.to_str())
+    mut pi = 0
+    while pi < posts_to_insert.len:
+        print("loop i=" + pi.to_str())
+        mut p = posts_to_insert.get(pi)
+        print("got post id=" + p.id.to_str())
+        mut vals = post_mapper.dump(p)
+        print("dumped post, n=" + vals.len.to_str())
+        mut compiled = insert(pt).values(names_p, vals).compile("sqlite")
+        print("compiled: " + compiled.sql)
+        mut pr: Result[SqliteResultSet, DbError] = engine.execute(compiled.sql, compiled.params)
+        if pr.is_err:
+            print("insert post failed: " + pr.err.message)
+            return
+        mut prs = pr.ok
+        mut pstep: Result[bool, DbError] = prs.next()
+        if pstep.is_err:
+            print("insert post step failed: " + pstep.err.message)
+            return
+        prs.release()
+        print("post inserted i=" + pi.to_str())
+        pi = pi + 1
+    print("all posts inserted")
+
+    print("about to call load_many")
+    mut many_r: Result[Vec[Post], DbError] = load_many[Post, SqliteConnection, SqliteResultSet](engine, "sqlite", post_mapper, "user_id", "1")
+    print("load_many returned")
+    if many_r.is_err:
+        print("load_many failed: " + many_r.err.message)
+        return
+    print("load_many ok, len=" + many_r.ok.len.to_str())
+
+    engine.release()
+    print("done")

@@ -16,6 +16,14 @@
 # earlier tauraroc version silently discarded interface type arguments in
 # this position; now fixed, see PROPOSAL.md's Status section.
 #
+# `PostgresResultSet implements DbResultSet` is ALSO explicit, for the
+# same reason sqlite_dialect.tr's PostgresResultSet-equivalent needs it --
+# see that file's header comment: tauraroc only generates a class-to-
+# interface boxing wrapper for an EXPLICIT `implements`, never for a
+# purely structural match (the kind a generic bound like `RS: DbResultSet`
+# is satisfied by), and `Mapper[T].load: def(DbResultSet) -> T` needs that
+# wrapper to box a concrete result-set value before calling through it.
+#
 # NOT re-exported by tauorm.tr's hub: importing this module requires the
 # `postgres` package (taupkg's `postgres` feature) to be installed. A
 # consumer who built without that feature must never have this module's
@@ -34,11 +42,11 @@
 # empirically) even though it compiles and `--check`s clean.
 
 from postgres import Connection, PgResult, PgError
-from dbapi import DbConnection
+from dbapi import DbConnection, DbResultSet
 from db_error import DbError
 from std.core.vec import Vec
 
-pub class PostgresResultSet:
+pub class PostgresResultSet implements DbResultSet:
     pub pg_result: PgResult
     pub index:     int
 

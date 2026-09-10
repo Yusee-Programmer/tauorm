@@ -1,0 +1,88 @@
+# Isolate: a generic FREE FUNCTION with 3 explicit type params where the
+# FIRST (C) is unbound and unrelated to the other two's own cross-
+# referencing bound (`[C, K: Conn[RS], RS: Res]`) -- mirrors
+# relationship.tr's load_many[C, K: DbConnection[RS], RS: DbResultSet]
+# shape exactly, using standalone placeholder interfaces/classes instead
+# of real DB drivers so it's fast to iterate on.
+
+interface Res:
+    def peek(self) -> int
+
+interface Conn[RS]:
+    def get(self) -> RS
+
+class MyRes implements Res:
+    pub n: int
+
+extend MyRes:
+    pub def peek(self) -> int:
+        return self.n
+
+class MyConn implements Conn[MyRes]:
+    pub val: int
+
+extend MyConn:
+    pub def get(self) -> MyRes:
+        mut r = MyRes()
+        r.n = self.val
+        return r
+
+class Box[K, RS]:
+    pub conn: K
+
+extend Box[K, RS]:
+    pub def wrap(conn: K) -> Box[K, RS]:
+        mut b = Box[K, RS]()
+        b.conn = conn
+        return b
+
+    pub def fetch(self) throws str -> RS:
+        return self.conn.get()
+
+class Holder[C]:
+    pub tag: str
+
+extend Holder[C]:
+    pub def init[C](tag: str) -> Holder[C]:
+        mut h = Holder[C]()
+        h.tag = tag
+        return h
+
+from std.core.vec import Vec
+
+class Mapper2[C]:
+    pub maker: def(int) -> C
+
+extend Mapper2[C]:
+    pub def init[C](maker: def(int) -> C) -> Mapper2[C]:
+        mut m = Mapper2[C]()
+        m.maker = maker
+        return m
+
+def load_many[C, K: Conn[RS], RS: Res](box: Box[K, RS], mapper: Mapper2[C], label: str) throws str -> Vec[C]:
+    print(label)
+    mut out: Vec[C] = Vec[C].init(4)
+    mut rs: Result[RS, str] = box.fetch()
+    if rs.is_err:
+        raise("boom")
+    mut n = rs.ok.peek()
+    out.push(mapper.maker(n))
+    out.push(mapper.maker(n + 1))
+    return out
+
+def make_str(n: int) -> str:
+    return "v" + n.to_str()
+
+def main():
+    mut mc = MyConn()
+    mc.val = 77
+    mut bx: Box[MyConn, MyRes] = Box[MyConn, MyRes].wrap(mc)
+    mut mp: Mapper2[str] = Mapper2[str].init(make_str)
+    mut result: Result[Vec[str], str] = load_many[str, MyConn, MyRes](bx, mp, "calling")
+    if result.is_err:
+        print("err")
+    else:
+        mut v = result.ok
+        print("len=" + v.len.to_str())
+        print(v.get(0))
+        print(v.get(1))

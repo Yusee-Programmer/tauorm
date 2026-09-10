@@ -1,0 +1,155 @@
+# tests.test_relationship_sqlite — real, in-memory end-to-end proof of
+# Phase 4: one-to-many (load_many) and many-to-one (load_one) queries
+# between two @mapped entities (User has many Post; Post belongs to
+# User), against real SQLite.
+
+from mapped import mapped
+from mapper import Mapper
+from relationship import load_many, load_one
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from engine import Engine
+from db_error import DbError
+from metadata import MetaData, create_all
+from table import Table
+from column import Column
+from col_types import Integer, Text
+from dbapi import DbResultSet
+from insert_stmt import insert
+from std.core.vec import Vec
+from std.test import TestRunner
+
+@mapped
+class User:
+    pub id: int
+    pub name: str
+
+@mapped
+class Post:
+    pub id: int
+    pub user_id: int
+    pub title: str
+
+def main():
+    mut t = TestRunner.init("Phase 4 (relationships, sqlite)")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        t.fail("could not open SQLite connection: " + open_r.err.message)
+        t.summary()
+        return
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+
+    mut users_table = User.__table()
+    mut posts_table = Post.__table()
+    # Post.user_id documents its FK in DDL -- doesn't affect querying below
+    # (SQLite doesn't enforce it without an explicit PRAGMA), just honest schema.
+    mut fk_res: Result[Column, str] = posts_table.col("user_id")
+    if not fk_res.is_err:
+        fk_res.ok.references("User", "id")
+
+    mut md = MetaData.init()
+    md.add(users_table)
+    md.add(posts_table)
+    mut create_res: Result[bool, DbError] = create_all[SqliteConnection, SqliteResultSet](md, engine, "sqlite")
+    if create_res.is_err:
+        t.fail("create_all failed: " + create_res.err.message)
+        t.summary()
+        return
+
+    mut user_mapper: Mapper[User] = Mapper[User].init(User.__table(), User.from_row, User.dump, User.key_of)
+    mut post_mapper: Mapper[Post] = Mapper[Post].init(Post.__table(), Post.from_row, Post.dump, Post.key_of)
+
+    # Seed: one user, two of their posts, one post for a DIFFERENT user id
+    # (never inserted as a User row -- proves load_many filters correctly,
+    # not just "returns everything").
+    mut u1 = User()
+    u1.id = 1
+    u1.name = "Ada"
+    mut ins_u: Vec[str] = user_mapper.dump(u1)
+    mut names_u: Vec[str] = Vec[str].init(2)
+    names_u.push("id")
+    names_u.push("name")
+    mut ins_u_compiled = insert(users_table).values(names_u, ins_u).compile("sqlite")
+    mut ins_u_r: Result[SqliteResultSet, DbError] = engine.execute(ins_u_compiled.sql, ins_u_compiled.params)
+    if ins_u_r.is_err:
+        t.fail("insert user failed: " + ins_u_r.err.message)
+        t.summary()
+        return
+    mut ins_u_rs = ins_u_r.ok
+    mut ins_u_step: Result[bool, DbError] = ins_u_rs.next()
+    if ins_u_step.is_err:
+        t.fail("insert user did not execute: " + ins_u_step.err.message)
+        t.summary()
+        return
+    ins_u_rs.release()
+
+    mut names_p: Vec[str] = Vec[str].init(3)
+    names_p.push("id")
+    names_p.push("user_id")
+    names_p.push("title")
+
+    mut p1 = Post()
+    p1.id = 1
+    p1.user_id = 1
+    p1.title = "First post"
+    mut p2 = Post()
+    p2.id = 2
+    p2.user_id = 1
+    p2.title = "Second post"
+    mut p3 = Post()
+    p3.id = 3
+    p3.user_id = 99
+    p3.title = "Someone else's post"
+
+    mut posts_to_insert: Vec[Post] = Vec[Post].init(3)
+    posts_to_insert.push(p1)
+    posts_to_insert.push(p2)
+    posts_to_insert.push(p3)
+    mut pi = 0
+    mut insert_failed = false
+    while pi < posts_to_insert.len:
+        mut p = posts_to_insert.get(pi)
+        mut vals = post_mapper.dump(p)
+        mut compiled = insert(posts_table).values(names_p, vals).compile("sqlite")
+        mut pr: Result[SqliteResultSet, DbError] = engine.execute(compiled.sql, compiled.params)
+        if pr.is_err:
+            t.fail("insert post failed: " + pr.err.message)
+            insert_failed = true
+        else:
+            mut prs = pr.ok
+            mut pstep: Result[bool, DbError] = prs.next()
+            if pstep.is_err:
+                t.fail("insert post did not execute: " + pstep.err.message)
+                insert_failed = true
+            prs.release()
+        pi = pi + 1
+    if insert_failed:
+        t.summary()
+        return
+
+    # One-to-many: every Post whose user_id == 1.
+    mut many_r: Result[Vec[Post], DbError] = load_many[Post, SqliteConnection, SqliteResultSet](engine, "sqlite", post_mapper, "user_id", "1")
+    if many_r.is_err:
+        t.fail("load_many failed: " + many_r.err.message)
+    else:
+        mut ada_posts = many_r.ok
+        t.assert_eq_int(ada_posts.len, 2, "load_many returns exactly Ada's 2 posts")
+        if ada_posts.len == 2:
+            t.assert_eq_str(ada_posts.get(0).title, "First post", "first post title matches insertion order")
+            t.assert_eq_str(ada_posts.get(1).title, "Second post", "second post title matches insertion order")
+
+    # Many-to-one: the User a given Post belongs to.
+    mut one_r: Result[User, DbError] = load_one[User, SqliteConnection, SqliteResultSet](engine, "sqlite", user_mapper, p1.user_id)
+    if one_r.is_err:
+        t.fail("load_one failed: " + one_r.err.message)
+    else:
+        t.assert_eq_str(one_r.ok.name, "Ada", "load_one resolves a post's author")
+
+    # Many-to-one on a dangling FK (p3.user_id == 99, no such User row).
+    mut missing_r: Result[User, DbError] = load_one[User, SqliteConnection, SqliteResultSet](engine, "sqlite", user_mapper, p3.user_id)
+    t.assert_true(missing_r.is_err, "load_one on a dangling FK fails")
+    if missing_r.is_err:
+        t.assert_eq_str(missing_r.err.code, "NOT_FOUND", "load_one on a dangling FK raises NOT_FOUND")
+
+    engine.release()
+    t.summary()

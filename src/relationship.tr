@@ -1,0 +1,74 @@
+# tauorm.relationship — Phase 4: one-to-many (`load_many`) and
+# many-to-one (`load_one`) queries between @mapped entities.
+#
+# There is no SQLAlchemy-style lazy relationship PROXY here (no
+# `user.posts` attribute that transparently queries on first access) --
+# Tauraro has no `__getattr__`-equivalent hook to intercept a plain field
+# read, so pretending to offer that would be dishonest. Both directions
+# are instead a single EXPLICIT call the caller makes when they actually
+# want the related rows, e.g.:
+#
+#   mut posts: Vec[Post] = load_many[Post, SqliteConnection, SqliteResultSet](engine, "sqlite", post_mapper, "user_id", user.id.to_str())?
+#   mut author: Post = load_one[User, SqliteConnection, SqliteResultSet](engine, "sqlite", user_mapper, post.user_id)?
+#
+# `load_one` overlaps with Session.get() (same query, same NOT_FOUND
+# convention) but skips the identity map -- for the common case of
+# resolving a single FK to its parent (or any other single-row-by-id
+# lookup) without needing a whole Session[Parent, ...] set up just for
+# that one read. Reach for Session.get() instead when the parent is
+# already being tracked by one (repeated lookups become identity-map
+# hits instead of repeated round trips).
+#
+# Foreign keys are plain Column metadata (see column.tr's `.references()`)
+# -- these functions query by the FK column's VALUE and don't depend on
+# that metadata being set; it exists so a Table can document its own
+# relationships honestly in DDL (`REFERENCES table(col)`), not because
+# it's required for loading to work.
+
+from dbapi import DbConnection, DbResultSet
+from db_error import DbError
+from engine import Engine
+from mapper import Mapper
+from expression import col, lit, eq
+from select_stmt import select_from
+from std.core.vec import Vec
+
+# One-to-many: every row of C whose `fk_column` equals `parent_id`
+# (e.g. every Post with `user_id = <this User's id>`).
+pub def load_many[C, K: DbConnection[RS], RS: DbResultSet](engine: Engine[K, RS], dialect: str, mapper: Mapper[C], fk_column: str, parent_id: str) throws DbError -> Vec[C]:
+    mut sel = select_from(mapper.table).where(eq(col(fk_column), lit(parent_id))).compile(dialect)
+    mut r: Result[RS, DbError] = engine.execute(sel.sql, sel.params)
+    if r.is_err:
+        raise(DbError.init(r.err.code, r.err.message))
+    mut rs = r.ok
+    mut out: Vec[C] = Vec[C].init(4)
+    mut step: Result[bool, DbError] = rs.next()
+    while not step.is_err and step.ok:
+        out.push(mapper.load(rs))
+        step = rs.next()
+    if step.is_err:
+        rs.release()
+        raise(DbError.init(step.err.code, step.err.message))
+    rs.release()
+    return out
+
+# Many-to-one: the single row of C whose "id" equals `id` (e.g. the User
+# a Post's `user_id` points at). Raises DbError("NOT_FOUND", ...) if no
+# such row exists -- same convention as Session.get().
+pub def load_one[C, K: DbConnection[RS], RS: DbResultSet](engine: Engine[K, RS], dialect: str, mapper: Mapper[C], id: int) throws DbError -> C:
+    mut key = id.to_str()
+    mut sel = select_from(mapper.table).where(eq(col("id"), lit(key))).compile(dialect)
+    mut r: Result[RS, DbError] = engine.execute(sel.sql, sel.params)
+    if r.is_err:
+        raise(DbError.init(r.err.code, r.err.message))
+    mut rs = r.ok
+    mut step: Result[bool, DbError] = rs.next()
+    if step.is_err:
+        rs.release()
+        raise(DbError.init(step.err.code, step.err.message))
+    if not step.ok:
+        rs.release()
+        raise(DbError.init("NOT_FOUND", "no row with id " + key))
+    mut obj = mapper.load(rs)
+    rs.release()
+    return obj

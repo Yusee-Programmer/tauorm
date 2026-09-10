@@ -1,0 +1,39 @@
+# Isolate: calling a `def(SomeInterface)->R` FIELD, passing a
+# GENERIC-TYPED argument (RS, monomorphized to a concrete class
+# implementing that interface) -- does the concrete value get correctly
+# BOXED into the interface's vtable wrapper before the call, the same way
+# it would if the parameter's static type were already known concretely?
+
+interface Shape:
+    def area(self) -> int
+
+class Square implements Shape:
+    pub side: int
+
+extend Square:
+    pub def area(self) -> int:
+        return self.side * self.side
+
+class Describer[C]:
+    pub describe: def(Shape) -> C
+
+extend Describer[C]:
+    pub def init[C](describe: def(Shape) -> C) -> Describer[C]:
+        mut d = Describer[C]()
+        d.describe = describe
+        return d
+
+def describe_it(s: Shape) -> str:
+    return "area=" + s.area().to_str()
+
+# The crux: RS is a generic type param (monomorphized to Square), passed
+# to a field whose declared param type is the INTERFACE Shape.
+def use_describer[C, RS](d: Describer[C], shape_val: RS) -> C:
+    return d.describe(shape_val)
+
+def main():
+    mut sq = Square()
+    sq.side = 5
+    mut d: Describer[str] = Describer[str].init(describe_it)
+    mut result = use_describer[str, Square](d, sq)
+    print(result)
