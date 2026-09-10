@@ -1,0 +1,25 @@
+# Isolate further: does await on an async method of a DIFFERENT class
+# (not generic, not self) from within another async method work at all?
+
+class Inner:
+    pub val: int
+
+extend Inner:
+    pub async def compute(self) -> int:
+        return self.val * 2
+
+class Outer:
+    pub inner: Inner
+
+extend Outer:
+    pub async def get(self) -> int:
+        mut r = await self.inner.compute()
+        return r
+
+async def main():
+    mut i = Inner()
+    i.val = 21
+    mut o = Outer()
+    o.inner = i
+    mut result = await o.get()
+    print(result)

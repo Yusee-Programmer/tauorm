@@ -1,0 +1,26 @@
+# Narrower isolation: does `await` work when the receiver is a plain
+# LOCAL VARIABLE holding another object (not a `self.field` access)?
+
+class Inner:
+    pub val: int
+
+extend Inner:
+    pub async def compute(self) -> int:
+        return self.val * 2
+
+class Outer:
+    pub inner: Inner
+
+extend Outer:
+    pub async def get(self) -> int:
+        mut local_inner = self.inner
+        mut r = await local_inner.compute()
+        return r
+
+async def main():
+    mut i = Inner()
+    i.val = 21
+    mut o = Outer()
+    o.inner = i
+    mut result = await o.get()
+    print(result)

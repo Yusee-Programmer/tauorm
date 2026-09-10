@@ -1,0 +1,11 @@
+class Foo:
+    pub val: int
+
+async def get_value_concrete(f: Foo) -> int:
+    return f.val * 2
+
+async def main():
+    mut foo = Foo()
+    foo.val = 21
+    mut result = await get_value_concrete(foo)
+    print(result)

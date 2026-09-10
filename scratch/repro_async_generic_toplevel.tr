@@ -1,0 +1,11 @@
+class Foo:
+    pub val: int
+
+async def get_value[T](f: T) -> int:
+    return 99
+
+async def main():
+    mut foo = Foo()
+    foo.val = 21
+    mut result = await get_value[Foo](foo)
+    print(result)

@@ -1,0 +1,44 @@
+# Does a generic class B[X] with a FIELD typed as another not-yet-
+# monomorphized generic class A[Y] corrupt A's struct emission when B is
+# monomorphized BEFORE A (e.g. because a plain top-level function's
+# parameter type mentions B before any variable of type A[int] exists)?
+#
+# Mirrors tauorm's Session[T,C,RS] (has an `engine: Engine[C,RS]` field
+# and a `mapper: Mapper[T]` field) combined with a concrete top-level
+# `async def commit_users(sess: Session[...])` textually BEFORE main()
+# creates the Engine/Mapper instances that would otherwise monomorphize
+# them first.
+
+class A[Y]:
+    pub val: Y
+
+extend A[Y]:
+    pub def make(v: Y) -> A[Y]:
+        mut a = A[Y]()
+        a.val = v
+        return a
+
+class B[X]:
+    pub tag: X
+    pub inner: A[int]
+
+extend B[X]:
+    pub def make(tag: X, inner: A[int]) -> B[X]:
+        mut b = B[X]()
+        b.tag = tag
+        b.inner = inner
+        return b
+
+    pub def get_inner_val(self) -> int:
+        return self.inner.val
+
+# A plain top-level function whose PARAMETER TYPE mentions B[str] --
+# forces B[str]'s monomorphization to happen here, textually before
+# main() ever constructs an A[int].
+def use_box(b: B[str]) -> int:
+    return b.get_inner_val()
+
+def main():
+    mut a: A[int] = A[int].make(42)
+    mut b: B[str] = B[str].make("tag1", a)
+    print(use_box(b).to_str())

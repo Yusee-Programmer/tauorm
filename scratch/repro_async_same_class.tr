@@ -1,0 +1,16 @@
+class Foo:
+    pub val: int
+
+extend Foo:
+    pub async def inner_compute(self) -> int:
+        return self.val * 2
+
+    pub async def outer_get(self) -> int:
+        mut r = await self.inner_compute()
+        return r
+
+async def main():
+    mut f = Foo()
+    f.val = 21
+    mut result = await f.outer_get()
+    print(result)

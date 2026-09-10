@@ -667,6 +667,68 @@ test-suite run as every other fix this session (no regressions; same 3
 pre-existing, unrelated failures as always), then the compiler was
 re-blessed.
 
+**Phase 5 (async) is done and verified for real** -- `test_async_sqlite.tr`
+round-trips real rows through real in-memory SQLite entirely via `await`
+(insert, get, identity-map hit vs. a genuine miss, update, delete, an
+unrelated row surviving another row's delete, and a raw standalone query),
+8 assertions, all passing. `async_engine.tr`/`async_session.tr` ship the
+CONCRETE-`async-def`-per-dialect pattern their own header comments already
+called for (a generic `async def engine_execute[C,RS](...)` is still
+blocked on the pre-existing, documented, not-root-caused bug: `await
+generic_fn[T](...)`'s own expression type still resolves wrong -- verified
+still open this session with the same minimal repro as before, unchanged
+by anything fixed below).
+
+Getting `test_async_sqlite.tr` to actually compile and run (not just
+`--check`-clean) surfaced two more real `tauraroc` bugs, both found via
+minimal, tauorm-unrelated repros before editing anything here, both fixed
+at the root in `~/tauraro/src/codegen/c.tr`:
+
+- **`await` on a `throws`-declared function produced C that tried to cast
+  a `Result` struct to/from an integer** ("aggregate value used where an
+  integer was expected" / "conversion to non-scalar type requested"),
+  reproduced directly with a 5-line, DB-unrelated repro (`async def f()
+  throws str -> int`, `await f(...)`). This one turned out to already be
+  fixed on `master` (`emit_async_wrapper_for_call`/`gen_await_call` both
+  heap-allocate-and-box `Result`/`Option`/`Tuple` returns instead of
+  pointer-casting them) -- the machine's deployed `tauraroc.exe` binary
+  simply predated that fix being rebuilt and blessed. Rebuilding from
+  current `master` alone resolved it; no source change was needed for
+  this one.
+- **A monomorphized generic class's OWN struct definition gets corrupted
+  when one of its fields is typed as ANOTHER not-yet-monomorphized
+  generic class** (`Session[T,C,RS]`'s `engine: Engine[C,RS]` and
+  `mapper: Mapper[T]` fields, hit whenever something textually before
+  `main()`'s own variable declarations -- here, the concrete top-level
+  `async def commit_users(sess: Session[...])`/`sqlite_execute(engine:
+  Engine[...], ...)` wrapper functions the design above calls for --
+  forces `Session`'s monomorphization to happen before `Engine`'s/
+  `Mapper`'s own. Root cause: `ensure_mono`'s struct-body field loop
+  calls `type_to_c(field.ty)` while already mid-way through writing this
+  class's own `typedef struct { ... }` text into `mono_buf`; when a
+  field's type is itself an unmonomorphized generic class, `type_to_c`
+  recursively calls `ensure_mono` for IT, which writes ITS complete
+  struct+prototypes through the exact same `mono_buf` redirect -- landing
+  spliced into the middle of the outer struct's still-open field list
+  (confirmed directly: `Engine`'s and `Mapper`'s entire struct
+  definitions appeared interleaved between two of `Session`'s field
+  lines in the generated header, a real, loud compile error, "has no
+  member named 'mapper'" etc.). Fixed by pre-resolving every field's C
+  type (triggering any nested `ensure_mono` calls to completion) BEFORE
+  writing this class's own forward declaration and struct body, so a
+  nested struct's text can only ever land strictly before the outer
+  one's, never inside it. Reproduced and verified independently of
+  tauorm with a minimal two-generic-class repro (a `B[X]` holding an
+  `A[int]` field, `A` monomorphized in field position before any
+  variable of type `A[int]` exists).
+
+Both were verified via the same gen-to-gen self-hosting fixpoint
+convention as every other fix in this document (compiled generated C
+diffed byte-identical between two consecutive self-compiles) and the
+full `tests/lang`+`tests/regression` suite (no regressions; same 3
+pre-existing, unrelated failures as always -- `fmt` idempotency on two
+example files, one `cdylib` test), then the compiler was re-blessed.
+
 ## What's deferred, and why
 
 - **Migrations** (an Alembic equivalent — versioned schema changes,
@@ -725,8 +787,14 @@ re-blessed.
    has driven their design yet; picking them up alongside real usage
    (rather than speculatively) matches how Phase 2 deferred FK/join
    support until Phase 4 actually needed it.
-5. **Phase 5 — Async.** `AsyncEngine`/`AsyncConnection`/`AsyncSession` per
-   the "Sync and async" section above, exercised against both dialects.
+5. **Phase 5 — Async.** `async_engine.tr`/`async_session.tr` per the "Sync
+   and async" section above: **done, see Status.** Verified end-to-end
+   against SQLite (8 assertions, `test_async_sqlite.tr`); no dedicated
+   Postgres async test, matching Phase 3/4's precedent (the dialect-
+   agnostic logic being exercised -- here, `await` itself plus the
+   concrete wrapper pattern -- was already proven dialect-agnostic in
+   Phase 1, so only SQLite needs its own runnable test; Postgres has no
+   live server available to actually run against here regardless).
 6. **Phase 6 (backlog, not scheduled).** Migrations, additional dialects,
    the advanced ORM features listed under "What's deferred."
 

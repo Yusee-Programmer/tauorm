@@ -1,0 +1,48 @@
+# Does naming an ASYNC method "get" (colliding with the non-async
+# built-in Map.get()/Vec.get()) break `await obj.get(...)` recognition?
+
+interface Conn[RS]:
+    def fetch(self) throws str -> RS
+
+class MyRes:
+    pub n: int
+
+class MyConn implements Conn[MyRes]:
+    pub val: int
+
+extend MyConn:
+    pub def fetch(self) throws str -> MyRes:
+        mut r = MyRes()
+        r.n = self.val
+        return r
+
+from std.core.map import Map
+
+class Holder3[T, K: Conn[RS], RS]:
+    pub conn: K
+    pub identity: Map[str, T]
+
+extend Holder3[T, K, RS]:
+    pub def init[T, K, RS](conn: K) -> Holder3[T, K, RS]:
+        mut h = Holder3[T, K, RS]()
+        h.conn = conn
+        h.identity = Map[str, T].init(4)
+        return h
+
+    pub async def get(self, key: str) throws str -> RS:
+        if self.identity.contains(key):
+            mut _cached = self.identity.get(key)
+        mut r: Result[RS, str] = self.conn.fetch()
+        if r.is_err:
+            raise(r.err)
+        return r.ok
+
+async def main():
+    mut mc = MyConn()
+    mc.val = 42
+    mut h: Holder3[str, MyConn, MyRes] = Holder3[str, MyConn, MyRes].init(mc)
+    mut result: Result[MyRes, str] = await h.get("k")
+    if result.is_err:
+        print("err")
+    else:
+        print("n=" + result.ok.n.to_str())

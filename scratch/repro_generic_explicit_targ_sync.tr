@@ -1,0 +1,16 @@
+# Sync (non-async) sibling of repro_async_generic_toplevel.tr: does
+# fname[T](args) infer the CALL's result type correctly when the
+# function's declared return type is NOT the generic param itself
+# (get_value[T](f: T) -> int, always int, never T)?
+
+class Foo:
+    pub val: int
+
+def get_value[T](f: T) -> int:
+    return 99
+
+def main():
+    mut foo = Foo()
+    foo.val = 21
+    mut result = get_value[Foo](foo)
+    print(result)

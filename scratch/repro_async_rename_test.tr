@@ -1,0 +1,46 @@
+# Does `await obj.method(...)` recognize an ASYNC method on a class
+# generic over THREE type params, where the first (T) is unrelated to
+# the other two's own cross-referencing bound (mirrors AsyncSession[T,
+# C: DbConnection[RS], RS: DbResultSet] exactly)?
+
+interface Conn[RS]:
+    def get(self) throws str -> RS
+
+class MyRes:
+    pub n: int
+
+class MyConn implements Conn[MyRes]:
+    pub val: int
+
+extend MyConn:
+    pub def get(self) throws str -> MyRes:
+        mut r = MyRes()
+        r.n = self.val
+        return r
+
+class Holder3[T, K: Conn[RS], RS]:
+    pub conn: K
+    pub tag: str
+
+extend Holder3[T, K, RS]:
+    pub def init[T, K, RS](conn: K, tag: str) -> Holder3[T, K, RS]:
+        mut h = Holder3[T, K, RS]()
+        h.conn = conn
+        h.tag = tag
+        return h
+
+    pub async def fetch(self) throws str -> RS:
+        mut r: Result[RS, str] = self.conn.get()
+        if r.is_err:
+            raise(r.err)
+        return r.ok
+
+async def main():
+    mut mc = MyConn()
+    mc.val = 42
+    mut h: Holder3[str, MyConn, MyRes] = Holder3[str, MyConn, MyRes].init(mc, "tag1")
+    mut result: Result[MyRes, str] = await h.fetch()
+    if result.is_err:
+        print("err")
+    else:
+        print("n=" + result.ok.n.to_str())

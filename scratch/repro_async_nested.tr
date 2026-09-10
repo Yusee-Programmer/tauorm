@@ -1,0 +1,60 @@
+# Does an async method on class A, calling `await` on a field of class B
+# (also generic, also async), work? Mirrors AsyncSession.get() calling
+# `await self.engine.execute(...)`.
+
+interface Conn[RS]:
+    def fetch(self) throws str -> RS
+
+class MyRes:
+    pub n: int
+
+class MyConn implements Conn[MyRes]:
+    pub val: int
+
+extend MyConn:
+    pub def fetch(self) throws str -> MyRes:
+        mut r = MyRes()
+        r.n = self.val
+        return r
+
+class Eng[K: Conn[RS], RS]:
+    pub conn: K
+
+extend Eng[K, RS]:
+    pub def wrap(conn: K) -> Eng[K, RS]:
+        mut e = Eng[K, RS]()
+        e.conn = conn
+        return e
+
+    pub async def execute(self) throws str -> RS:
+        mut r: Result[RS, str] = self.conn.fetch()
+        if r.is_err:
+            raise(r.err)
+        return r.ok
+
+class Sess[T, K: Conn[RS], RS]:
+    pub engine: Eng[K, RS]
+
+extend Sess[T, K, RS]:
+    pub def init[T, K, RS](engine: Eng[K, RS]) -> Sess[T, K, RS]:
+        mut s = Sess[T, K, RS]()
+        s.engine = engine
+        return s
+
+    pub async def get(self) throws str -> RS:
+        mut eng = self.engine
+        mut r: Result[RS, str] = await eng.execute()
+        if r.is_err:
+            raise(r.err)
+        return r.ok
+
+async def main():
+    mut mc = MyConn()
+    mc.val = 42
+    mut eng: Eng[MyConn, MyRes] = Eng[MyConn, MyRes].wrap(mc)
+    mut sess: Sess[str, MyConn, MyRes] = Sess[str, MyConn, MyRes].init(eng)
+    mut result: Result[MyRes, str] = await sess.get()
+    if result.is_err:
+        print("err")
+    else:
+        print("n=" + result.ok.n.to_str())

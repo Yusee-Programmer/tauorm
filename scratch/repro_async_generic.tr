@@ -1,0 +1,54 @@
+# Does `async def` work on a method of a GENERIC class, combined with
+# `throws` and a generic bound (mirrors AsyncEngine[C: DbConnection[RS],
+# RS: DbResultSet].execute())? Not exercised anywhere in this project yet.
+
+interface Conn[RS]:
+    def get(self) throws str -> RS
+
+class MyRes:
+    pub n: int
+
+class MyConn implements Conn[MyRes]:
+    pub val: int
+
+extend MyConn:
+    pub def get(self) throws str -> MyRes:
+        if self.val < 0:
+            raise("bad")
+        mut r = MyRes()
+        r.n = self.val
+        return r
+
+class AsyncBox[K: Conn[RS], RS]:
+    pub conn: K
+
+extend AsyncBox[K, RS]:
+    pub def wrap(conn: K) -> AsyncBox[K, RS]:
+        mut b = AsyncBox[K, RS]()
+        b.conn = conn
+        return b
+
+    pub async def fetch(self) throws str -> RS:
+        mut r: Result[RS, str] = self.conn.get()
+        if r.is_err:
+            raise(r.err)
+        return r.ok
+
+async def main():
+    mut mc = MyConn()
+    mc.val = 42
+    mut bx: AsyncBox[MyConn, MyRes] = AsyncBox[MyConn, MyRes].wrap(mc)
+    mut result: Result[MyRes, str] = await bx.fetch()
+    if result.is_err:
+        print("err: " + result.err)
+    else:
+        print("n=" + result.ok.n.to_str())
+
+    mut mc2 = MyConn()
+    mc2.val = -1
+    mut bx2: AsyncBox[MyConn, MyRes] = AsyncBox[MyConn, MyRes].wrap(mc2)
+    mut result2: Result[MyRes, str] = await bx2.fetch()
+    if result2.is_err:
+        print("err2: " + result2.err)
+    else:
+        print("n2=" + result2.ok.n.to_str())

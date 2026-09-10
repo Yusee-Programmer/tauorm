@@ -1,0 +1,17 @@
+async def get_value(n: int) throws str -> int:
+    if n < 0:
+        raise("negative")
+    return n * 2
+
+async def main():
+    mut r1: Result[int, str] = await get_value(21)
+    if r1.is_err:
+        print("err1: " + r1.err)
+    else:
+        print("ok1: " + r1.ok.to_str())
+
+    mut r2: Result[int, str] = await get_value(-5)
+    if r2.is_err:
+        print("err2: " + r2.err)
+    else:
+        print("ok2: " + r2.ok.to_str())

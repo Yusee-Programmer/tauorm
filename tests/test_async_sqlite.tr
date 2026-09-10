@@ -1,0 +1,143 @@
+# tests.test_async_sqlite — real, in-memory end-to-end proof of Phase 5:
+# CONCRETE `async def` wrappers (see async_engine.tr/async_session.tr's
+# header comments for why they're concrete, not generic) round-trip real
+# rows through real SQLite via `await`, reusing the SAME @mapped entity,
+# Engine, and Session Phase 1/3 already proved.
+
+from mapped import mapped
+from mapper import Mapper
+from engine import Engine
+from session import Session
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from db_error import DbError
+from metadata import MetaData, create_all
+from table import Table
+from column import Column
+from col_types import Integer, Text
+from dbapi import DbResultSet
+from std.core.vec import Vec
+from std.test import TestRunner
+
+@mapped
+class User:
+    pub id: int
+    pub name: str
+    pub age: int
+
+# Concrete async wrappers -- one per (entity, dialect) combination, per
+# async_session.tr's documented pattern.
+async def get_user(sess: Session[User, SqliteConnection, SqliteResultSet], id: int) throws DbError -> User:
+    mut r: Result[User, DbError] = sess.get(id)
+    if r.is_err:
+        raise(DbError.init(r.err.code, r.err.message))
+    return r.ok
+
+async def commit_users(sess: Session[User, SqliteConnection, SqliteResultSet]) throws DbError -> bool:
+    mut r: Result[bool, DbError] = sess.commit()
+    if r.is_err:
+        raise(DbError.init(r.err.code, r.err.message))
+    return r.ok
+
+async def sqlite_execute(engine: Engine[SqliteConnection, SqliteResultSet], sql: str, params: Vec[str]) throws DbError -> SqliteResultSet:
+    mut r: Result[SqliteResultSet, DbError] = engine.execute(sql, params)
+    if r.is_err:
+        raise(DbError.init(r.err.code, r.err.message))
+    return r.ok
+
+async def main():
+    mut t = TestRunner.init("Phase 5 (async, sqlite)")
+
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        t.fail("could not open SQLite connection: " + open_r.err.message)
+        t.summary()
+        return
+    mut engine: Engine[SqliteConnection, SqliteResultSet] = Engine[SqliteConnection, SqliteResultSet].wrap(open_r.ok)
+
+    mut users_table = User.__table()
+    mut md = MetaData.init()
+    md.add(users_table)
+    mut create_res: Result[bool, DbError] = create_all[SqliteConnection, SqliteResultSet](md, engine, "sqlite")
+    if create_res.is_err:
+        t.fail("create_all failed: " + create_res.err.message)
+        t.summary()
+        return
+
+    mut mapper: Mapper[User] = Mapper[User].init(User.__table(), User.from_row, User.dump, User.key_of)
+    mut sess: Session[User, SqliteConnection, SqliteResultSet] = Session[User, SqliteConnection, SqliteResultSet].init(engine, mapper, "sqlite")
+
+    # INSERT: add() is pure bookkeeping (sync); commit() does real I/O (async).
+    mut u1 = User()
+    u1.id = 1
+    u1.name = "Ada"
+    u1.age = 36
+    sess.add(u1)
+    mut u2 = User()
+    u2.id = 2
+    u2.name = "Grace"
+    u2.age = 85
+    sess.add(u2)
+    mut commit1: Result[bool, DbError] = await commit_users(sess)
+    if commit1.is_err:
+        t.fail("commit (insert) failed: " + commit1.err.message)
+        t.summary()
+        return
+
+    # await get_user() round-trips real row data.
+    mut got1: Result[User, DbError] = await get_user(sess, 1)
+    if got1.is_err:
+        t.fail("get(1) failed: " + got1.err.message)
+        t.summary()
+        return
+    t.assert_eq_str(got1.ok.name, "Ada", "await get_user(1) returns the inserted row's name")
+    t.assert_eq_int(got1.ok.age, 36, "await get_user(1) returns the inserted row's age")
+
+    # Identity-map hit (no round trip) vs. a genuine miss.
+    mut got_missing: Result[User, DbError] = await get_user(sess, 999)
+    t.assert_true(got_missing.is_err, "await get_user() on a missing id fails")
+    if got_missing.is_err:
+        t.assert_eq_str(got_missing.err.code, "NOT_FOUND", "await get_user() on a missing id raises NOT_FOUND")
+
+    # UPDATE via mark_dirty() (sync)/await commit_users() (async).
+    mut u1_loaded = got1.ok
+    u1_loaded.age = 37
+    sess.mark_dirty(u1_loaded)
+    mut commit2: Result[bool, DbError] = await commit_users(sess)
+    if commit2.is_err:
+        t.fail("commit (update) failed: " + commit2.err.message)
+        t.summary()
+        return
+    mut verify: Result[User, DbError] = await get_user(sess, 1)
+    if not verify.is_err:
+        t.assert_eq_int(verify.ok.age, 37, "mark_dirty + await commit_users updates the row")
+
+    # DELETE via delete() (sync)/await commit_users() (async).
+    sess.delete(u1_loaded)
+    mut commit3: Result[bool, DbError] = await commit_users(sess)
+    if commit3.is_err:
+        t.fail("commit (delete) failed: " + commit3.err.message)
+        t.summary()
+        return
+    mut after_delete: Result[User, DbError] = await get_user(sess, 1)
+    t.assert_true(after_delete.is_err, "delete + await commit_users removes the row")
+
+    # The other row (Grace) is untouched.
+    mut got2: Result[User, DbError] = await get_user(sess, 2)
+    if not got2.is_err:
+        t.assert_eq_str(got2.ok.name, "Grace", "unrelated row survives another row's delete")
+
+    # Raw sqlite_execute() also works standalone (not just through Session).
+    mut count_sql = "SELECT COUNT(*) FROM " + users_table.name
+    mut no_params: Vec[str] = Vec[str].init(0)
+    mut count_r: Result[SqliteResultSet, DbError] = await sqlite_execute(engine, count_sql, no_params)
+    if count_r.is_err:
+        t.fail("await sqlite_execute failed: " + count_r.err.message)
+    else:
+        mut count_rs = count_r.ok
+        mut count_step: Result[bool, DbError] = count_rs.next()
+        if not count_step.is_err and count_step.ok:
+            t.assert_eq_int(count_rs.get_int(0), 1, "await sqlite_execute runs a raw query (1 row left)")
+        count_rs.release()
+
+    engine.release()
+    t.summary()

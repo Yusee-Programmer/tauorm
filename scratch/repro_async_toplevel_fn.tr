@@ -1,0 +1,20 @@
+# Workaround check: TOP-LEVEL async functions (not methods) calling
+# `await obj.method()`, chained through another top-level async function
+# (not just directly from main()).
+
+class Foo:
+    pub val: int
+
+extend Foo:
+    pub async def compute(self) -> int:
+        return self.val * 2
+
+async def get_value(f: Foo) -> int:
+    mut r = await f.compute()
+    return r
+
+async def main():
+    mut foo = Foo()
+    foo.val = 21
+    mut result = await get_value(foo)
+    print(result)
