@@ -8,8 +8,9 @@
 # comparisons.
 
 pub class ColumnType:
-    pub kind:   str   # "integer" | "bigint" | "text" | "varchar" | "boolean" | "float" | "datetime"
-    pub length: int   # VarChar's length; 0 = not applicable
+    pub kind:     str   # "integer" | "bigint" | "text" | "varchar" | "boolean" | "float" | "datetime" | "raw"
+    pub length:   int   # VarChar's length; 0 = not applicable
+    pub raw_text: str   # "raw" kind only -- see Raw() below; "" for every other kind
 
 extend ColumnType:
     # The DDL fragment for this type alone (no column name, no constraints)
@@ -32,12 +33,14 @@ extend ColumnType:
         if self.kind == "datetime":
             if dialect == "postgres": return "TIMESTAMP"
             return "TEXT"      # SQLite stores datetime as TEXT/REAL/INTEGER; TEXT (ISO8601) is its own documented convention
+        if self.kind == "raw": return self.raw_text
         return "TEXT"
 
 def _mk(kind: str, length: int) -> ColumnType:
     mut t = ColumnType()
     t.kind = kind
     t.length = length
+    t.raw_text = ""
     return t
 
 pub def Integer() -> ColumnType:
@@ -60,3 +63,18 @@ pub def Float() -> ColumnType:
 
 pub def DateTime() -> ColumnType:
     return _mk("datetime", 0)
+
+# A dialect-DDL-text passthrough type: `ddl(dialect)` returns `text`
+# verbatim, ignoring `dialect` entirely. Meant for reconstructing a
+# `Column`/`Table` from an INTROSPECTED database schema (taumigrate's own
+# use case) where the exact semantic kind can't always be recovered --
+# most notably on SQLite, whose type-affinity system collapses several of
+# the kinds above onto the same DDL text (integer/bigint/boolean all
+# declare as "INTEGER"; text/varchar/datetime all declare as "TEXT"), so
+# there is no honest way to reverse-map a bare "INTEGER" back to one
+# specific kind. Carrying the introspected text through unchanged is more
+# honest than guessing.
+pub def Raw(text: str) -> ColumnType:
+    mut t = _mk("raw", 0)
+    t.raw_text = text
+    return t

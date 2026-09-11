@@ -790,16 +790,6 @@ after all 6 fixes landed.
 
 ## What's deferred, and why
 
-- **Migrations** (an Alembic equivalent — versioned schema changes,
-  autogenerate-by-diffing-metadata): explicitly out of scope for this
-  proposal. `MetaData`/`Table`/`Column` (Phase 2 below) is the same
-  introspectable schema representation a migration tool would diff against,
-  so nothing here forecloses it — it's a separate, later package/phase the
-  same way connection pooling started as "a separate `taupostgres-pool`
-  package" for taupostgres before that call was reversed once it turned out
-  to be little enough code to fold in directly. Migrations are a much bigger
-  undertaking than that pooling case, so deferring is the more defensible
-  default here, not just a smaller version of the same call.
 - **Additional dialects** (MySQL/MariaDB, etc.): the dialect interface is
   designed for this from the start (see above), but no third driver exists
   in this workspace yet to build one against honestly.
@@ -854,8 +844,21 @@ after all 6 fixes landed.
    concrete wrapper pattern -- was already proven dialect-agnostic in
    Phase 1, so only SQLite needs its own runnable test; Postgres has no
    live server available to actually run against here regardless).
-6. **Phase 6 (backlog, not scheduled).** Migrations, additional dialects,
-   the advanced ORM features listed under "What's deferred."
+6. **Phase 6 — Migrations.** **Done**, as its own sibling package,
+   [`../taumigrate`](../taumigrate) (see its own PROPOSAL.md) -- a
+   revision chain, DB-side version tracking, upgrade/downgrade, and full
+   autogenerate (introspect a live DB, diff against `MetaData`, generate
+   dialect-correct SQL, including SQLite's copy-table-rebuild dance for
+   column changes SQLite's own `ALTER TABLE` can't express directly). Kept
+   as a separate package rather than folded into tauorm itself -- most
+   tauorm consumers never run a migration, the same reasoning that keeps
+   the two DB drivers as their own packages rather than living inside
+   tauorm. `col_types.tr` gained one small, additive `Raw(text)`
+   passthrough `ColumnType` kind to support it (see taumigrate's
+   PROPOSAL.md for why). Remaining backlog, not scheduled: additional
+   dialects (MySQL/MariaDB -- no third driver exists in this workspace yet
+   to build one against honestly), and the advanced ORM features listed
+   under "What's deferred" above.
 
 Each phase should land with tests run against *both* enabled features
 (`taupkg test --features postgres` and `--features sqlite`) before moving

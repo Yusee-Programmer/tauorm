@@ -47,7 +47,7 @@ from db_error import DbError
 from dbapi import DbConnection, DbResultSet
 from engine import Engine
 
-from col_types import ColumnType, Integer, BigInteger, Text, VarChar, Boolean, Float, DateTime
+from col_types import ColumnType, Integer, BigInteger, Text, VarChar, Boolean, Float, DateTime, Raw
 from column import Column
 from table import Table
 from metadata import MetaData, create_all, drop_all
