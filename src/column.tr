@@ -62,6 +62,13 @@ extend Column:
     # (SQLite -- an INTEGER PRIMARY KEY column there is itself an alias for
     # the table's own rowid and behaves like autoincrement, so it doesn't
     # need SQLite's separate, rarely-recommended AUTOINCREMENT keyword).
+    #
+    # This renders an INLINE (per-column) PRIMARY KEY -- correct only when
+    # this is the table's ONE primary-key column. A COMPOSITE (multi-
+    # column) primary key can't be expressed per-column in SQL at all; see
+    # `ddl_no_pk` + `Table.create_sql`'s own header comment for how a
+    # table with more than one `primary_key`-flagged column renders a
+    # table-level `PRIMARY KEY (a, b)` constraint instead.
     pub def ddl(self, dialect: str) -> str:
         if self.primary_key and self.col_type.kind == "integer":
             if dialect == "postgres":
@@ -71,6 +78,25 @@ extend Column:
         if self.primary_key:
             sql = sql + " PRIMARY KEY"
         elif not self.nullable:
+            sql = sql + " NOT NULL"
+        if self.unique:
+            sql = sql + " UNIQUE"
+        if self.ref_table != "":
+            sql = sql + " REFERENCES " + self.ref_table + "(" + self.ref_column + ")"
+        return sql
+
+    # Same as `ddl`, but never renders an inline `PRIMARY KEY` (even if
+    # `self.primary_key` is set) -- used by `Table.create_sql` for every
+    # column when the table has a COMPOSITE primary key (2+ columns with
+    # `primary_key = true`), since the key is instead expressed once, as
+    # a trailing table-level `PRIMARY KEY (a, b, ...)` constraint. NOT NULL
+    # is still emitted explicitly here for a primary-key column (a
+    # composite key's member columns are still non-nullable -- `pk()`
+    # already sets `nullable = false` -- just not expressed via the
+    # inline `PRIMARY KEY` keyword this method omits).
+    pub def ddl_no_pk(self, dialect: str) -> str:
+        mut sql = self.name + " " + self.col_type.ddl(dialect)
+        if not self.nullable:
             sql = sql + " NOT NULL"
         if self.unique:
             sql = sql + " UNIQUE"

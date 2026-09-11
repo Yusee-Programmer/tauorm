@@ -1,0 +1,63 @@
+from sqlite_dialect import SqliteConnection, SqliteResultSet
+from db_error import DbError
+from std.core.vec import Vec
+
+def main():
+    mut open_r: Result[SqliteConnection, DbError] = SqliteConnection.open(":memory:")
+    if open_r.is_err:
+        print("open failed: " + open_r.err.message)
+        return
+    mut conn = open_r.ok
+
+    mut no_params: Vec[str] = Vec[str].init(0)
+    mut c1: Result[SqliteResultSet, DbError] = conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", no_params)
+    if c1.is_err:
+        print("create failed: " + c1.err.message)
+        return
+    mut c1rs = c1.ok
+    mut c1step: Result[bool, DbError] = c1rs.next()
+    if c1step.is_err:
+        print("create did not execute: " + c1step.err.message)
+        return
+
+    mut names: Vec[str] = Vec[str].init(3)
+    names.push("alice")
+    names.push("bob")
+    names.push("charlie")
+
+    mut i = 0
+    while i < names.len:
+        mut p: Vec[str] = Vec[str].init(1)
+        p.push(names.get(i))
+        mut ins: Result[SqliteResultSet, DbError] = conn.execute("INSERT INTO t (name) VALUES (?)", p)
+        if ins.is_err:
+            print("insert failed: " + ins.err.message)
+            return
+        mut insrs = ins.ok
+        mut insstep: Result[bool, DbError] = insrs.next()
+        if insstep.is_err:
+            print("insert did not execute: " + insstep.err.message)
+            return
+        i = i + 1
+
+    mut sel: Result[SqliteResultSet, DbError] = conn.execute("SELECT name FROM t ORDER BY id", no_params)
+    if sel.is_err:
+        print("select failed: " + sel.err.message)
+        return
+    mut rs = sel.ok
+
+    # Store every row's string ACROSS iterations (the normal usage the
+    # header comment in sqlite_dialect.tr warns about) -- if `+ ""` fails
+    # to force a real copy, later entries will alias/corrupt earlier ones
+    # once step() reuses SQLite's column buffer.
+    mut collected: Vec[str] = Vec[str].init(3)
+    mut step: Result[bool, DbError] = rs.next()
+    while not step.is_err and step.ok:
+        collected.push(rs.get_str(0))
+        step = rs.next()
+
+    print("collected.len=" + collected.len.to_str())
+    mut j = 0
+    while j < collected.len:
+        print("[" + j.to_str() + "] = '" + collected.get(j) + "' (len=" + collected.get(j).len().to_str() + ")")
+        j = j + 1

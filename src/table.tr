@@ -26,15 +26,51 @@ extend Table:
             i = i + 1
         raise("Table '" + self.name + "' has no column '" + name + "'")
 
-    pub def create_sql(self, dialect: str) -> str:
-        mut sql = "CREATE TABLE " + self.name + " (\n"
+    # Names of every `primary_key`-flagged column, in declaration order --
+    # 0 columns (no PK declared), 1 (the ordinary case), or 2+ (a
+    # COMPOSITE key). `create_sql` uses this to decide between rendering
+    # each column's PRIMARY KEY inline (the 0/1 cases -- SQL has no other
+    # way to express a single-column key) vs. a trailing table-level
+    # `PRIMARY KEY (a, b, ...)` constraint (2+ -- the ONLY way SQL can
+    # express a multi-column key at all).
+    pub def primary_key_columns(self) -> Vec[str]:
+        mut pk: Vec[str] = Vec[str].init(2)
         mut i = 0
         while i < self.columns.len:
             mut c = self.columns.get(i)
-            sql = sql + "    " + c.ddl(dialect)
-            if i < self.columns.len - 1: sql = sql + ","
-            sql = sql + "\n"
+            if c.primary_key: pk.push(c.name)
             i = i + 1
+        return pk
+
+    pub def create_sql(self, dialect: str) -> str:
+        mut pk_cols = self.primary_key_columns()
+        mut composite = pk_cols.len > 1
+
+        mut lines: Vec[str] = Vec[str].init(self.columns.len + 1)
+        mut i = 0
+        while i < self.columns.len:
+            mut c = self.columns.get(i)
+            if composite:
+                lines.push(c.ddl_no_pk(dialect))
+            else:
+                lines.push(c.ddl(dialect))
+            i = i + 1
+        if composite:
+            mut pk_list = ""
+            mut pj = 0
+            while pj < pk_cols.len:
+                if pj > 0: pk_list = pk_list + ", "
+                pk_list = pk_list + pk_cols.get(pj)
+                pj = pj + 1
+            lines.push("PRIMARY KEY (" + pk_list + ")")
+
+        mut sql = "CREATE TABLE " + self.name + " (\n"
+        mut li = 0
+        while li < lines.len:
+            sql = sql + "    " + lines.get(li)
+            if li < lines.len - 1: sql = sql + ","
+            sql = sql + "\n"
+            li = li + 1
         sql = sql + ")"
         return sql
 
