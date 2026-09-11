@@ -18,9 +18,10 @@
 #     does on a normal connection -- not true non-blocking I/O yet.
 #
 # There is NO reusable, generic `async def engine_execute[C, RS](...)`
-# helper in this file, and there won't be one until a real tauraroc fix
-# lands -- this isn't a design choice, it's a hard compiler limitation
-# found and root-caused (not worked around) building this phase:
+# helper in this file -- not because it's still blocked (it isn't, as of
+# a later session: see point 3 below), but because nothing here has been
+# changed to use one. Three real tauraroc bugs were found and root-caused
+# building/finishing this phase, all now fixed upstream:
 #
 #   1. `await generic_fn[T](...)` never triggered monomorphization for
 #      the callee at all -- the scan that finds every generic call site
@@ -39,20 +40,24 @@
 #      one). FIXED (removed the premature early call; the later one,
 #      correctly positioned after monomorphized bodies AND interface
 #      wraps, covers every case).
-#   3. Even with both of those fixed, `await generic_fn[T](args)`'s
-#      overall expression TYPE is inferred incorrectly for at least one
-#      shape tried (a trivial `async def f[T](x: T) -> int: return 99`
+#   3. `await generic_fn[T](args)`'s overall expression TYPE was inferred
+#      incorrectly (a trivial `async def f[T](x: T) -> int: return 99`
 #      called as `await f[Foo](foo)` printed a `Foo` pointer's
-#      description instead of the int `99`) -- confirmed directly with a
-#      minimal, tauorm-unrelated repro, but NOT root-caused before this
-#      phase needed to ship; a real fix needs more investigation than
-#      this session had time left for.
+#      description instead of the int `99`). Root-caused in a LATER
+#      session: not async-specific at all -- `fname[T](args)` (a single
+#      explicit type arg) never looked up the function's actual declared
+#      return type in `sema.tr`, it just blindly set the call's result
+#      type to the type ARGUMENT itself (only correct when the function
+#      returns `T` verbatim). The identical mistake reproduces in a plain
+#      SYNC call too (`mut r = get_value[Foo](foo)`), just as a loud
+#      compile error instead of a silent one -- confirmed directly with
+#      tauorm-unrelated repros before this fix. FIXED (the single-arg case
+#      now mirrors the already-correct multi-type-arg sibling case).
 #
-# Given (3), shipping a generic async engine function today would
-# silently corrupt return values for real callers -- worse than not
-# offering one. The proven-reliable pattern (confirmed directly, see
-# tests/test_async_sqlite.tr) is a plain, CONCRETE (non-generic) `async
-# def` per concrete (C, RS) pair you actually use:
+# The proven-reliable pattern (confirmed directly, see
+# tests/test_async_sqlite.tr) remains a plain, CONCRETE (non-generic)
+# `async def` per concrete (C, RS) pair you actually use -- now a
+# readability/explicitness choice rather than a compiler-forced one:
 #
 #   async def sqlite_execute(engine: Engine[SqliteConnection, SqliteResultSet], sql: str, params: Vec[str]) throws DbError -> SqliteResultSet:
 #       mut r: Result[SqliteResultSet, DbError] = engine.execute(sql, params)
@@ -62,5 +67,5 @@
 #
 # Copy this one function per dialect you use (it's ~5 lines); `await
 # sqlite_execute(engine, sql, params)` gets the OS-thread hop safely. A
-# generic version can replace it as a drop-in, API-compatible upgrade
-# once tauraroc's async+generics interaction is fixed for real.
+# generic version is a viable, API-compatible upgrade now that point 3
+# above is fixed -- not attempted here since nothing required it.

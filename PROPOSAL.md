@@ -672,62 +672,121 @@ round-trips real rows through real in-memory SQLite entirely via `await`
 (insert, get, identity-map hit vs. a genuine miss, update, delete, an
 unrelated row surviving another row's delete, and a raw standalone query),
 8 assertions, all passing. `async_engine.tr`/`async_session.tr` ship the
-CONCRETE-`async-def`-per-dialect pattern their own header comments already
-called for (a generic `async def engine_execute[C,RS](...)` is still
-blocked on the pre-existing, documented, not-root-caused bug: `await
-generic_fn[T](...)`'s own expression type still resolves wrong -- verified
-still open this session with the same minimal repro as before, unchanged
-by anything fixed below).
+CONCRETE-`async-def`-per-dialect pattern, though as of this session that is
+now a style choice rather than a forced workaround -- see bug 3 below, the
+one gap that pattern was originally built to route around is fixed.
 
 Getting `test_async_sqlite.tr` to actually compile and run (not just
-`--check`-clean) surfaced two more real `tauraroc` bugs, both found via
-minimal, tauorm-unrelated repros before editing anything here, both fixed
-at the root in `~/tauraro/src/codegen/c.tr`:
+`--check`-clean), and then going back to close out the one gap the
+concrete-function design had explicitly deferred, surfaced **6 real
+`tauraroc` bugs** this session, each found via a minimal, tauorm-unrelated
+repro before editing anything here, each fixed at the root (mix of
+`codegen/c.tr`, `sema.tr`, `parser.tr`, `macros.tr`/`main.tr`):
 
-- **`await` on a `throws`-declared function produced C that tried to cast
-  a `Result` struct to/from an integer** ("aggregate value used where an
-  integer was expected" / "conversion to non-scalar type requested"),
-  reproduced directly with a 5-line, DB-unrelated repro (`async def f()
-  throws str -> int`, `await f(...)`). This one turned out to already be
-  fixed on `master` (`emit_async_wrapper_for_call`/`gen_await_call` both
-  heap-allocate-and-box `Result`/`Option`/`Tuple` returns instead of
-  pointer-casting them) -- the machine's deployed `tauraroc.exe` binary
-  simply predated that fix being rebuilt and blessed. Rebuilding from
-  current `master` alone resolved it; no source change was needed for
-  this one.
-- **A monomorphized generic class's OWN struct definition gets corrupted
-  when one of its fields is typed as ANOTHER not-yet-monomorphized
-  generic class** (`Session[T,C,RS]`'s `engine: Engine[C,RS]` and
-  `mapper: Mapper[T]` fields, hit whenever something textually before
-  `main()`'s own variable declarations -- here, the concrete top-level
-  `async def commit_users(sess: Session[...])`/`sqlite_execute(engine:
-  Engine[...], ...)` wrapper functions the design above calls for --
-  forces `Session`'s monomorphization to happen before `Engine`'s/
-  `Mapper`'s own. Root cause: `ensure_mono`'s struct-body field loop
-  calls `type_to_c(field.ty)` while already mid-way through writing this
-  class's own `typedef struct { ... }` text into `mono_buf`; when a
-  field's type is itself an unmonomorphized generic class, `type_to_c`
-  recursively calls `ensure_mono` for IT, which writes ITS complete
-  struct+prototypes through the exact same `mono_buf` redirect -- landing
-  spliced into the middle of the outer struct's still-open field list
-  (confirmed directly: `Engine`'s and `Mapper`'s entire struct
-  definitions appeared interleaved between two of `Session`'s field
-  lines in the generated header, a real, loud compile error, "has no
-  member named 'mapper'" etc.). Fixed by pre-resolving every field's C
-  type (triggering any nested `ensure_mono` calls to completion) BEFORE
-  writing this class's own forward declaration and struct body, so a
-  nested struct's text can only ever land strictly before the outer
-  one's, never inside it. Reproduced and verified independently of
-  tauorm with a minimal two-generic-class repro (a `B[X]` holding an
-  `A[int]` field, `A` monomorphized in field position before any
-  variable of type `A[int]` exists).
+1. **`await` on a `throws`-declared function produced C that tried to cast
+   a `Result` struct to/from an integer** ("aggregate value used where an
+   integer was expected" / "conversion to non-scalar type requested"),
+   reproduced directly with a 5-line, DB-unrelated repro (`async def f()
+   throws str -> int`, `await f(...)`). Turned out to already be fixed on
+   `master` (`emit_async_wrapper_for_call`/`gen_await_call` both
+   heap-allocate-and-box `Result`/`Option`/`Tuple` returns instead of
+   pointer-casting them) -- the machine's deployed `tauraroc.exe` binary
+   simply predated that fix being rebuilt and blessed. Rebuilding from
+   current `master` alone resolved it; no source change needed.
+2. **A monomorphized generic class's OWN struct definition gets corrupted
+   when one of its fields is typed as ANOTHER not-yet-monomorphized
+   generic class** (`Session[T,C,RS]`'s `engine: Engine[C,RS]` and
+   `mapper: Mapper[T]` fields, hit whenever something textually before
+   `main()`'s own variable declarations -- here, the concrete top-level
+   `async def commit_users(sess: Session[...])`/`sqlite_execute(engine:
+   Engine[...], ...)` wrapper functions -- forces `Session`'s
+   monomorphization to happen before `Engine`'s/`Mapper`'s own.
+   `ensure_mono`'s struct-body field loop calls `type_to_c(field.ty)`
+   while already mid-way through writing this class's own `typedef
+   struct { ... }` text into `mono_buf`; when a field's type is itself an
+   unmonomorphized generic class, `type_to_c` recursively calls
+   `ensure_mono` for IT, writing ITS complete struct+prototypes through
+   the exact same `mono_buf` redirect -- landing spliced into the middle
+   of the outer struct's still-open field list (`Engine`'s and `Mapper`'s
+   entire struct definitions appeared interleaved between two of
+   `Session`'s field lines, "has no member named 'mapper'" etc.). Fixed
+   by pre-resolving every field's C type (forcing nested `ensure_mono`
+   calls to completion) BEFORE writing this class's own forward
+   declaration and struct body.
+3. **`fname[T](args)` (a single explicit type argument) never looked up
+   the function's ACTUALLY DECLARED return type** -- it blindly set the
+   call's result type to the type ARGUMENT itself, correct only when the
+   function returns `T` verbatim and silently wrong for anything else
+   (`get_value[T](f: T) -> int`, always `int`, regardless of `T`). This
+   was the previously-documented "won't fix this session" gap
+   (`await generic_fn[T](...)` printing a pointer instead of an int) --
+   and it turned out to be a plain sema bug, not async-specific at all:
+   the identical mistake reproduces in a bare SYNC call
+   (`mut r = get_value[Foo](foo)`), just as a loud compile error instead
+   of a silent one. The sibling multi-type-arg case
+   (`fname[T1,T2](args)`) already resolved this correctly; the single-arg
+   case in `sema.tr`'s generic-call handling just never had the matching
+   logic. Fixed by looking up the function's declared return type and
+   only substituting the explicit type arg when it actually matches the
+   function's own (first) generic parameter -- mirroring the multi-arg
+   case exactly. **This means `async_engine.tr`/`async_session.tr`'s
+   concrete-per-dialect pattern is no longer a forced workaround** -- a
+   generic async helper is viable now, though nothing here was changed to
+   use one.
+4. **`async def` METHODS inside `extend` blocks were not recognized as
+   async at all.** `parser.tr`'s `parse_extend_decl` method-parsing loop
+   had cases for `KwDef`/`KwPass`/`Dedent|Eof` but none for `KwAsync` --
+   it fell into the catch-all `case _: self.pos += 1`, silently discarding
+   the `async` token; the method then parsed as an ordinary sync method
+   (`is_async` never set). Invisible unless the method's OWN body calls
+   `await` internally (then: "[C-4] 'await' used outside an async
+   function" on a method plainly declared `async def`). **Async methods
+   were entirely unsupported before this fix -- only async FREE functions
+   worked.** Fixed by adding a `Token.KwAsync` case mirroring the
+   top-level decl parser's own handling.
+5. **`Map`/`Dict` `.get()`/`.get_or()`/`.set()`/`.free()` checked the raw,
+   un-substituted generic type-PARAM name against `_is_str_type`/
+   `_is_float_type` instead of resolving it through the active
+   `type_subst` first** -- inside a monomorphized method where a field's
+   value type (e.g. `Map[str, T]`, `T=str` for this instantiation)
+   resolves concretely, the raw-name check always missed, producing
+   `(TrStr)(uintptr_t)ptr` (casting a pointer directly to a non-scalar
+   STRUCT type). Fixed 4 sites in `codegen/c.tr` to resolve via
+   `self.resolve_generic_prim(...)` first, matching the float check
+   immediately adjacent to (and previously inconsistent with) each one.
+   A pre-existing, SLet-level compensating workaround for a genuinely
+   different case (a BARE `Dict` annotation with no value-type arg at
+   all, `mut config: Dict = {...}`) looked redundant once this landed and
+   was deleted -- wrongly: it regressed `tests/lang/02_collections.tr`
+   ("invalid initializer") since that case has no type info to resolve at
+   all. Restored it with its condition updated to the same
+   `resolve_generic_prim` check, so the two mechanisms agree on when
+   unboxing already happened and never double-unbox.
+6. **A macro-generated PLAIN TOP-LEVEL decl's function BODY was never
+   emitted to any `.c` file** (an undefined-reference link error despite
+   `--check` passing cleanly and the prototype existing) -- this was
+   exactly the gap Phase 3's status notes above already predicted the
+   root cause of without fixing it. Confirmed precisely that: `main.tr`
+   builds the per-module/main `fn_set`s (deciding which `.c` file's
+   body-emission loop a function belongs to) from
+   `resolver.all_decls`/`all_decl_modules`, snapshotted by `resolve_main`
+   BEFORE `expand_macros` runs; a macro-spliced decl is appended to
+   `prog.decls` but never learned about by those resolver-owned lists, so
+   it's absent from every `fn_set` and its body-emission is silently
+   skipped everywhere. Fixed via a new `expand_macros_tracked(prog,
+   all_decls, all_decl_modules)` in `macros.tr` that pushes each
+   newly-generated decl into the SAME resolver lists, attributed to its
+   trigger decl's own module (valid because `prog.decls[i]` and
+   `resolver.all_decls[i]` are the SAME pointers in the SAME order at
+   this pass's entry point).
 
-Both were verified via the same gen-to-gen self-hosting fixpoint
-convention as every other fix in this document (compiled generated C
-diffed byte-identical between two consecutive self-compiles) and the
-full `tests/lang`+`tests/regression` suite (no regressions; same 3
-pre-existing, unrelated failures as always -- `fmt` idempotency on two
-example files, one `cdylib` test), then the compiler was re-blessed.
+All 6 were verified together in ONE final gen-to-gen self-hosting fixpoint
+(compiled generated C diffed byte-identical between two consecutive
+self-compiles) and ONE full `tests/lang`+`tests/regression` suite run (no
+regressions; same 3 pre-existing, unrelated failures as always -- `fmt`
+idempotency on two example files, one `cdylib` test), then the compiler was
+re-blessed. Every tauorm phase (1 through 5) was re-run and still passes
+after all 6 fixes landed.
 
 ## What's deferred, and why
 
